@@ -12,11 +12,28 @@ const fs = require("fs");
 require("dotenv").config();
 
 const app = express();
-const port = 5000;
+const port = process.env.PORT || 5000;
 
 // Configure multer for file uploads
 const upload = multer({ dest: "tmp/" });
-app.use(cors());
+
+const allowedOrigins = [
+    "https://miceband.com",
+    "http://micebandstaging.netlify.app",
+    "https://mice-band-5d7efe3ee4f2.herokuapp.com"
+];
+
+app.use(cors({
+    origin: function (origin, callback) {
+        if (!origin || allowedOrigins.includes(origin) || /^http:\/\/localhost(:\d+)?$/.test(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error("Not allowed by CORS"));
+        }
+    },
+    credentials: true,
+}));
+
 
 const minimaxApiKey = process.env.API_KEY_MINIMAX;
 
@@ -369,5 +386,6 @@ const saveToTestFolder = (timestamp, trimmedVideoPath, lastFramePath, aiVideoPat
     return { finalTrimmedPath, finalLastFramePath, finalAiVideoPath, finalCombinedPath };
 };
 
-
-app.listen(port, () => console.log(`Server running on port ${port}`));
+app.listen(port, () => {
+    console.log(`🚀 Server running on port ${port}`);
+});
