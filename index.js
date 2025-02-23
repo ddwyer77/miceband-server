@@ -61,21 +61,30 @@ app.post("/api/process-video", upload.single("originalVideo"), async (req, res) 
 
         // Step 3: Generate AI video from last frame
         console.log("Generating AI video...");
-        const generatedVideoPath = await generateAIVideo(lastFramePath, prompt, aiVideoPath);
+        let generatedVideoPath = await generateAIVideo(lastFramePath, prompt, aiVideoPath);
         console.log("AI video generated:", generatedVideoPath);
 
-        // Step 5: Add background music
+        // Step 4: Handle double generation if enabled
+        if (doubleGeneration) {
+            console.log("🔄 Performing double generation...");
+            const doubleGeneratedVideoPath = aiVideoPath.replace(/\.mp4$/, "_double.mp4");
+            generatedVideoPath = await handleDoubleGeneration(generatedVideoPath, doubleGeneratedVideoPath);
+            console.log("🎥 Double generation completed:", generatedVideoPath);
+        }
+
+        // Step 4: Add background music
         console.log("Adding background audio...");
         await addBackgroundMusic(generatedVideoPath, generatedVideoWithAudioPath, audioUrl, timestamp);
         console.log("Audio added:", generatedVideoWithAudioPath);
 
-        // Step 4: Merge the trimmed video with AI-generated video
+        // Step 5: Merge the trimmed video with AI-generated video
         console.log("Merging videos...");
         await mergeVideos(trimmedVideoPath, generatedVideoWithAudioPath, combinedVideoPath);
         console.log("Videos merged:", combinedVideoPath);
 
         console.log("✅ Video processing complete! ", combinedVideoPath);
 
+        //TODO: Remove before merging
         // saveToTestFolder(timestamp, trimmedVideoPath, lastFramePath, aiVideoPath, combinedVideoPath);
 
         // Return final video with metadata
@@ -267,6 +276,59 @@ const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp) => {
             console.error("❌ Error downloading audio or processing video:", error);
             reject(error);
         }
+    });
+};
+
+/**
+ * Handle Double Generation: Reverse AI video and merge with original
+ */
+const handleDoubleGeneration = (inputVideoPath, outputVideoPath) => {
+    return new Promise((resolve, reject) => {
+        const reversedVideoPath = inputVideoPath.replace(/\.mp4$/, "_reversed.mp4");
+
+        console.log("🔄 Checking if AI video has audio:", inputVideoPath);
+
+        // Step 1: Check if the input video has an audio stream
+        ffmpeg.ffprobe(inputVideoPath, (err, metadata) => {
+            if (err) {
+                return reject("❌ Error probing video metadata: " + err);
+            }
+
+            const hasAudio = metadata.streams.some(stream => stream.codec_type === "audio");
+
+            console.log(`🎵 Audio detected: ${hasAudio}`);
+
+            // Step 2: Build the filtergraph dynamically
+            let filterGraph = "[0:v]reverse[v]";
+            let outputOptions = ["-map", "[v]"];
+
+            if (hasAudio) {
+                filterGraph += ";[0:a]areverse[a]";
+                outputOptions.push("-map", "[a]");
+            }
+
+            console.log("Applying filter:", filterGraph);
+
+            // Step 3: Reverse the AI-generated video (and audio if available)
+            ffmpeg(inputVideoPath)
+                .complexFilter(filterGraph)
+                .outputOptions(outputOptions)
+                .output(reversedVideoPath)
+                .on("end", async () => {
+                    console.log("✅ Reversed video created:", reversedVideoPath);
+
+                    // Step 4: Merge original and reversed video
+                    try {
+                        await mergeVideos(inputVideoPath, reversedVideoPath, outputVideoPath);
+                        console.log("✅ Double generation complete:", outputVideoPath);
+                        resolve(outputVideoPath);
+                    } catch (mergeError) {
+                        reject(mergeError);
+                    }
+                })
+                .on("error", reject)
+                .run();
+        });
     });
 };
 
