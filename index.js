@@ -24,154 +24,288 @@ const imageToBase64 = (filePath) => {
     return fs.readFileSync(filePath, { encoding: "base64" });
 };
 
-app.post("/api/trim-video", upload.single("video"), (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: "No file uploaded" });
-    }
+app.post("/api/process-video", upload.single("originalVideo"), async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ error: "No video uploaded" });
 
-    const inputFilePath = req.file.path;
-    const outputFilePath = `tmp/trimmed_${Date.now()}.mp4`;
+        // Extract user-provided parameters
+        const { prompt, clipLength, doubleGeneration, audioUrl, generationType } = req.body;
+        const timestamp = Date.now();
+        console.log("Processing video for:", generationType);
 
-    ffmpeg(inputFilePath)
-        .setStartTime(0)
-        .setDuration(5) // Trim to 5 seconds
-        .output(outputFilePath)
-        .on("end", () => {
-            res.download(outputFilePath, "trimmed_video.mp4", (err) => {
-                fs.unlinkSync(inputFilePath); // Delete original
-                fs.unlinkSync(outputFilePath); // Delete trimmed file after response
-            });
-        })
-        .on("error", (err) => {
-            console.error("FFmpeg Error:", err);
-            res.status(500).json({ error: "Video processing failed" });
-            fs.unlinkSync(inputFilePath);
-        })
-        .run();
-});
+        const inputFilePath = path.resolve(req.file.path); // Convert to absolute path
+        const tmpDir = "/tmp"; // Ensure temp directory exists
+        if (!fs.existsSync(tmpDir)) {
+            fs.mkdirSync(tmpDir, { recursive: true });
+        }
+   
+        const trimmedVideoPath = path.join(tmpDir, `trimmed_${timestamp}.mp4`);
+        const lastFramePath = path.join(tmpDir, `last_frame_${timestamp}.jpg`);
+        const aiVideoPath = path.join(tmpDir, `ai_generated_${timestamp}.mp4`);
+        const generatedVideoWithAudioPath = path.join(tmpDir, `generated_with_audio_${timestamp}.mp4`);
+        const combinedVideoPath = path.join(tmpDir, `combined_${timestamp}.mp4`);
 
-app.post("/api/extract-last-frame", upload.single("video"), (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: "No file uploaded" });
-    }
-
-    const inputFilePath = req.file.path;
-    const outputImagePath = `uploads/last_frame_${Date.now()}.jpg`;
-
-    // Get video duration first to extract last frame
-    ffmpeg.ffprobe(inputFilePath, (err, metadata) => {
-        if (err) {
-            console.error("FFmpeg Error:", err);
-            return res.status(500).json({ error: "Failed to get video metadata" });
+        if (!fs.existsSync(inputFilePath)) {
+            console.error("❌ Input file does not exist:", inputFilePath);
+            return res.status(500).json({ error: "Input file is missing." });
         }
 
-        const duration = metadata.format.duration; // Video duration in seconds
-        const lastFrameTime = Math.max(0, duration - 0.1); // Avoid exceeding bounds
+        // Step 1: Trim video to user-defined length
+        console.log("Trimming video...");
+        await trimVideo(inputFilePath, trimmedVideoPath, clipLength);
 
-        ffmpeg(inputFilePath)
-            .screenshots({
-                timestamps: [lastFrameTime],
-                filename: path.basename(outputImagePath),
-                folder: "uploads",
-                size: "1920x1080",
-            })
+        // Step 2: Extract last frame
+        console.log("Extracting last frame...");
+        await extractLastFrame(trimmedVideoPath, lastFramePath);
+        console.log("Last frame extracted:", lastFramePath);
+
+        // Step 3: Generate AI video from last frame
+        console.log("Generating AI video...");
+        const generatedVideoPath = await generateAIVideo(lastFramePath, prompt, aiVideoPath);
+        console.log("AI video generated:", generatedVideoPath);
+
+        // Step 5: Add background music
+        console.log("Adding background audio...");
+        await addBackgroundMusic(generatedVideoPath, generatedVideoWithAudioPath, audioUrl, timestamp);
+        console.log("Audio added:", generatedVideoWithAudioPath);
+
+        // Step 4: Merge the trimmed video with AI-generated video
+        console.log("Merging videos...");
+        await mergeVideos(trimmedVideoPath, generatedVideoWithAudioPath, combinedVideoPath);
+        console.log("Videos merged:", combinedVideoPath);
+
+        console.log("✅ Video processing complete! ", combinedVideoPath);
+
+        // saveToTestFolder(timestamp, trimmedVideoPath, lastFramePath, aiVideoPath, combinedVideoPath);
+
+        // Return final video with metadata
+        res.download(path.resolve(combinedVideoPath), "generated_video.mp4", (err) => {
+            if (err) {
+                console.error("Error sending final video:", err);
+                return res.status(500).json({ error: "Failed to send video." });
+            }
+            // Cleanup temp files after sending
+            cleanupFiles([inputFilePath, trimmedVideoPath, lastFramePath, aiVideoPath, combinedVideoPath]);
+        });
+    } catch (error) {
+        console.error("❌ Error processing video:", error);
+        cleanupFiles([inputFilePath, trimmedVideoPath, lastFramePath, aiVideoPath, combinedVideoPath]);
+        return res.status(500).json({ error: "Internal server error." });
+    }
+});
+
+/**
+ * Test
+ */
+app.get("/api/video", (req, res) => {
+    const { filename } = req.query;
+    if (!filename) {
+        return res.status(400).send("Filename is required");
+    }
+
+    // Ensure correct path handling for all OS
+    const videoPath = path.join(__dirname, "tmp", filename);
+
+    console.log("Checking for file:", videoPath);
+
+    if (!fs.existsSync(videoPath)) {
+        return res.status(404).send("Video not found");
+    }
+
+    res.sendFile(videoPath);
+});
+
+// TODO: REMOVE
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+/**
+ * Trim a video to a specific length
+ */
+const trimVideo = (inputPath, outputPath, duration) => {
+    return new Promise((resolve, reject) => {
+        ffmpeg(inputPath)
+            .setStartTime(0)
+            .setDuration(duration)
+            .output(outputPath)
+            .on("end", () => resolve(outputPath))
+            .on("error", reject)
+            .run();
+    });
+};
+
+/**
+ * Extract the last frame of a video
+ */
+const extractLastFrame = (inputPath, outputImagePath) => {
+    return new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(inputPath, (err, metadata) => {
+            if (err) return reject(err);
+            const duration = metadata.format.duration;
+            const lastFrameTime = Math.max(0, duration - 0.1);
+            ffmpeg(inputPath)
+                .screenshots({ timestamps: [lastFrameTime], filename: path.basename(outputImagePath), folder: "/tmp", size: "1920x1080" })
+                .on("end", () => resolve(outputImagePath))
+                .on("error", reject);
+        });
+    });
+};
+
+/**
+ * Generate AI video using MiniMax API
+ */
+const generateAIVideo = async (imagePath, prompt, outputPath) => {
+    const imageBase64 = imageToBase64(imagePath);
+    const payload = { model: "I2V-01", first_frame_image: `data:image/png;base64,${imageBase64}`, prompt };
+    const headers = { authorization: `Bearer ${minimaxApiKey}`, "Content-Type": "application/json" };
+
+    const response = await axios.post("https://api.minimaxi.chat/v1/video_generation", payload, { headers });
+    const taskId = response.data.task_id;
+    
+    // Poll for completion
+    let fileId;
+    while (!fileId) {
+        await new Promise((resolve) => setTimeout(resolve, 10000));
+        const statusRes = await axios.get(`https://api.minimaxi.chat/v1/query/video_generation?task_id=${taskId}`, { headers });
+        if (statusRes.data.status === "Success") fileId = statusRes.data.file_id;
+    }
+
+    // Retrieve AI video
+    const fileRes = await axios.get(`https://api.minimaxi.chat/v1/files/retrieve?file_id=${fileId}`, { headers });
+    fs.writeFileSync(outputPath, (await axios.get(fileRes.data.file.download_url, { responseType: "arraybuffer" })).data);
+    
+    return outputPath;
+};
+
+/**
+ * Merge two videos
+ */
+const mergeVideos = (video1, video2, outputPath) => {
+    return new Promise((resolve, reject) => {
+        const tmpDir = "/tmp"; // Ensure using a valid temp directory
+
+        if (!fs.existsSync(tmpDir)) {
+            console.log("Creating /tmp directory...");
+            fs.mkdirSync(tmpDir, { recursive: true });
+        }
+
+        // Define the file list path
+        const tmpFileList = path.join(__dirname, "video_list.txt");
+
+        console.log("📄 Writing file list to:", tmpFileList);
+
+        // Create a temporary file list for FFmpeg
+        try {
+            fs.writeFileSync(
+                tmpFileList,
+                `file '${path.resolve(video1).replace(/\\/g, "/")}'\nfile '${path.resolve(video2).replace(/\\/g, "/")}'\n`
+            );
+        } catch (error) {
+            console.error("❌ Error writing file list:", error);
+            return reject(error);
+        }
+
+        console.log("✅ File list created successfully.");
+
+        // Run FFmpeg to merge videos
+        ffmpeg()
+            .input(tmpFileList)
+            .inputOptions(["-f concat", "-safe 0"]) // Use concat mode
+            .outputOptions(["-c copy"]) // Copy streams without re-encoding
+            .output(outputPath)
             .on("end", () => {
-                res.sendFile(path.resolve(outputImagePath), () => {
-                    fs.unlinkSync(inputFilePath); // Delete original video
-                    fs.unlinkSync(outputImagePath); // Delete image after sending
-                });
+                console.log("✅ Video merging complete:", outputPath);
+                fs.unlinkSync(tmpFileList); // Cleanup temporary file
+                resolve(outputPath);
             })
             .on("error", (err) => {
-                console.error("FFmpeg Error:", err);
-                res.status(500).json({ error: "Frame extraction failed" });
-                fs.unlinkSync(inputFilePath);
-            });
+                console.error("❌ FFmpeg merging error:", err);
+                reject(err);
+            })
+            .run();
     });
-});
-
-app.post("/api/generate-video", upload.single("image"), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: "No image uploaded" });
-        }
-
-        const { prompt } = req.body;
-
-        if (!prompt) {
-            return res.status(400).json({ error: "Prompt is required" });
-        }
-
-        const imageBase64 = imageToBase64(req.file.path);
-
-        // Define the payload
-        const payload = {
-            model: "video-01", // Image to Video model
-            first_frame_image: `data:image/png;base64,${imageBase64}`,
-            prompt: prompt, 
-        };
-
-        const headers = {
-            authorization: `Bearer ${minimaxApiKey}`,
-            "Content-Type": "application/json",
-        };
-
-        // Request AI video generation
-        const response = await axios.post("https://api.minimaxi.chat/v1/video_generation", payload, { headers });
-
-        // Delete temp image
-        fs.unlinkSync(req.file.path);
-
-        if (response.data.task_id) {
-            return res.json({ task_id: response.data.task_id, message: "Video generation started." });
-        } else {
-            return res.status(500).json({ error: "Failed to create video generation task." });
-        }
-    } catch (error) {
-        console.error("Error generating video:", error);
-        return res.status(500).json({ error: "Internal server error." });
-    }
-});
+};
 
 /**
- * Query Video Generation Status
+ * Add background music to video
  */
-app.get("/api/video-status/:taskId", async (req, res) => {
-    try {
-        const taskId = req.params.taskId;
-        const response = await axios.get(`https://api.minimaxi.chat/v1/query/video_generation?task_id=${taskId}`, {
-            headers: { authorization: `Bearer ${minimaxApiKey}` },
-        });
+const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp) => {
+    return new Promise(async (resolve, reject) => {
+        try {
+            // Ensure the /tmp directory exists
+            const tmpDir = path.join(__dirname, "tmp");
+            if (!fs.existsSync(tmpDir)) {
+                fs.mkdirSync(tmpDir, { recursive: true });
+            }
 
-        if (response.data.status === "Success") {
-            return res.json({ status: "Success", file_id: response.data.file_id });
-        } else {
-            return res.json({ status: response.data.status });
+            // Download the audio file
+            const audioResponse = await axios.get(audioUrl, { responseType: "arraybuffer" });
+            const audioPath = path.join(tmpDir, `audio_${timestamp}.mp3`);
+            fs.writeFileSync(audioPath, Buffer.from(audioResponse.data));
+
+            // Merge audio with video
+            ffmpeg(videoPath)
+                .input(audioPath)
+                .outputOptions("-shortest")
+                .output(outputPath)
+                .on("end", () => {
+                    // Check if file was created before resolving
+                    if (fs.existsSync(outputPath)) {
+                        console.log("✅ Audio successfully added:", outputPath);
+                        fs.unlinkSync(audioPath); // Cleanup audio file
+                        resolve(outputPath);
+                    } else {
+                        console.error("❌ FFmpeg finished but output file is missing:", outputPath);
+                        reject(new Error("FFmpeg finished but output file is missing"));
+                    }
+                })
+                .on("error", (err) => {
+                    console.error("❌ FFmpeg audio merge failed:", err);
+                    reject(err);
+                })
+                .run();
+        } catch (error) {
+            console.error("❌ Error downloading audio or processing video:", error);
+            reject(error);
         }
-    } catch (error) {
-        console.error("Error checking video status:", error);
-        return res.status(500).json({ error: "Internal server error." });
-    }
-});
+    });
+};
 
 /**
- * Retrieve AI-Generated Video URL
+ * Cleanup temporary files
  */
-app.get("/api/get-video/:fileId", async (req, res) => {
-    try {
-        const fileId = req.params.fileId;
-        const response = await axios.get(`https://api.minimaxi.chat/v1/files/retrieve?file_id=${fileId}`, {
-            headers: { authorization: `Bearer ${minimaxApiKey}` },
-        });
-
-        if (response.data.file && response.data.file.download_url) {
-            return res.json({ download_url: response.data.file.download_url });
-        } else {
-            return res.status(500).json({ error: "Failed to get video URL." });
+const cleanupFiles = (files) => {
+    files.forEach((file) => {
+        if (fs.existsSync(file)) {
+            fs.unlinkSync(file);
         }
-    } catch (error) {
-        console.error("Error retrieving video:", error);
-        return res.status(500).json({ error: "Internal server error." });
+    });
+};
+
+const saveToTestFolder = (timestamp, trimmedVideoPath, lastFramePath, aiVideoPath, combinedVideoPath) => {
+    const uploadDir = path.resolve("uploads"); // Define upload directory
+
+    if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
     }
-});
+
+    const finalTrimmedPath = path.join(uploadDir, `trimmed_${timestamp}.mp4`);
+    const finalLastFramePath = path.join(uploadDir, `last_frame_${timestamp}.jpg`);
+    const finalAiVideoPath = path.join(uploadDir, `ai_generated_${timestamp}.mp4`);
+    const finalCombinedPath = path.join(uploadDir, `combined_${timestamp}.mp4`);
+
+    fs.copyFileSync(trimmedVideoPath, finalTrimmedPath);
+    fs.copyFileSync(lastFramePath, finalLastFramePath);
+    fs.copyFileSync(aiVideoPath, finalAiVideoPath);
+    fs.copyFileSync(combinedVideoPath, finalCombinedPath);
+
+    console.log("✅ Files moved to uploads/ for preview.");
+    console.log("Trimmed Video Path:", finalTrimmedPath);
+    console.log("Last Frame Path:", finalLastFramePath);
+    console.log("AI Video Path:", finalAiVideoPath);
+    console.log("Combined Video Path:", finalCombinedPath);
+
+    return { finalTrimmedPath, finalLastFramePath, finalAiVideoPath, finalCombinedPath };
+};
+
 
 app.listen(port, () => console.log(`Server running on port ${port}`));
