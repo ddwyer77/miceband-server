@@ -10,6 +10,8 @@ const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
+const { uploadGeneratedVideosForFeed } = require("./firebase/upload");
+const { addDocument } = require("./firebase/firestore"); 
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -110,7 +112,7 @@ app.post("/api/complete-video", async (req, res) => {
     const combinedVideoPath = `tmp/combined_${timestamp}.mp4`;
 
     try {
-        let { aiVideoFileId, audioUrl, doubleGeneration, trimmedVideo, clipLength } = req.body;
+        let { aiVideoFileId, audioUrl, doubleGeneration, trimmedVideo, clipLength, generationType, email } = req.body;
 
         console.log("🔄 Fetching AI video...");
         await getAIVideoFile(aiVideoFileId, aiVideoPath);
@@ -143,16 +145,16 @@ app.post("/api/complete-video", async (req, res) => {
         //TODO: Comment out
         // saveToTestFolder(timestamp, trimmedVideoPath, aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath)
 
-        // Return final video as download, same as original process-video
-        res.download(path.resolve(combinedVideoPath), "generated_video.mp4", (err) => {
-            if (err) {
-                console.error("❌ Error sending final video:", err);
-                return res.status(500).json({ error: "Failed to send video." });
-            }
-            // Cleanup temporary files after sending
-            cleanupFiles([aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath, trimmedVideoPath]);
-        });
+        const downloadUrl = await uploadAndSaveVideo(combinedVideoPath, { generationType });
+        console.log("✅ Video uploaded and saved:", downloadUrl);
 
+        // if (email && email.trim() !== "") {
+        //     console.log(`📧 Sending email to ${email}...`);
+        //     await sendVideoEmail(email, downloadUrl);
+        // }
+
+        cleanupFiles([aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath, trimmedVideoPath]);
+        return res.status(200).json({ success: true, videoUrl: downloadUrl });
     } catch (error) {
         console.error("❌ Error completing video:", error);
         cleanupFiles([aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath, trimmedVideoPath]);
@@ -475,6 +477,56 @@ const ensureLocalFile = async (videoPath, localPath) => {
     console.log(`📄 Video is already local: ${videoPath}`);
     return videoPath;
 };
+
+async function uploadAndSaveVideo(mergedVideoUrl, generationData) {
+    const storagePath = `generatedVideosUnapproved/video-${Date.now()}.mp4`;
+    const videoTitle = path.basename(storagePath, ".mp4");
+
+    try {
+        // Ensure the video exists locally before uploading
+        const localVideoPath = await ensureLocalFile(mergedVideoUrl, `tmp/${videoTitle}.mp4`);
+
+        // Upload video to Firebase Storage
+        const downloadUrl = await uploadGeneratedVideosForFeed(localVideoPath, storagePath);
+        console.log("✅ Video uploaded to Firebase:", downloadUrl);
+
+        // Save metadata to Firestore
+        const newDocId = await addDocument("videos", downloadUrl, videoTitle, generationData.generationType);
+        console.log("✅ New item added to Firestore:", newDocId);
+
+        return downloadUrl;
+    } catch (err) {
+        console.error("❌ Error uploading or saving video:", err);
+        throw err;
+    }
+}
+
+async function sendVideoEmail(email, videoUrl) {
+    try {
+        const emailData = {
+            service_id: process.env.EMAILJS_SERVICE_ID, // EmailJS Service ID
+            template_id: process.env.EMAILJS_TEMPLATE_ID, // EmailJS Template ID
+            user_id: process.env.EMAILJS_PUBLIC_KEY, // EmailJS Public Key
+            template_params: {
+                recipient_email: email, // Email of the recipient
+                video_url: videoUrl,
+                from_name: "Mice Band" // Video URL to be included in the email
+            },
+        };
+
+        const response = await axios.post("https://api.emailjs.com/api/v1.0/email/send", emailData, {
+            headers: { "Content-Type": "application/json" },
+        });
+
+        if (response.status === 200) {
+            console.log(`✅ Email sent successfully to ${email}`);
+        } else {
+            console.error("❌ Failed to send email.");
+        }
+    } catch (error) {
+        console.error("❌ Error sending email:", error);
+    }
+}
 
 app.listen(port, () => {
     console.log(`🚀 Server running on port ${port}`);
