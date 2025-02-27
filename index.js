@@ -21,7 +21,7 @@ const upload = multer({ dest: "tmp/" });
 
 const allowedOrigins = [
     "https://miceband.com",
-    "http://micebandstaging.netlify.app",
+    "https://micebandstaging.netlify.app",
     "https://mice-band-5d7efe3ee4f2.herokuapp.com"
 ];
 
