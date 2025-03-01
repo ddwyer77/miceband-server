@@ -74,6 +74,8 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
         console.log("Extracting last frame...");
         await extractLastFrame(trimmedVideoPath, lastFramePath);
         console.log("Last frame extracted:", lastFramePath);
+
+        // testImage(lastFramePath, timestamp);
       
         if (!fs.existsSync(lastFramePath)) {
             console.error("❌ File does not exist:", lastFramePath);
@@ -143,7 +145,7 @@ app.post("/api/complete-video", async (req, res) => {
         console.log("✅ Video processing complete!", combinedVideoPath);
 
         //TODO: Comment out
-        // saveToTestFolder(timestamp, trimmedVideoPath, aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath)
+        // saveToTestFolder(timestamp, [trimmedVideoPath, aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath])
 
         const downloadUrl = await uploadAndSaveVideo(combinedVideoPath, { generationType });
         console.log("✅ Video uploaded and saved:", downloadUrl);
@@ -172,9 +174,25 @@ const trimVideo = (inputPath, outputPath, duration) => {
         ffmpeg(inputPath)
             .setStartTime(0)
             .setDuration(duration)
+            .outputOptions([
+                "-c:v libx264", // 🔹 H.264 encoding for compatibility
+                "-preset veryfast", // 🔹 Faster processing
+                "-crf 23", // 🔹 Balanced quality & file size
+                "-c:a aac", // 🔹 Ensure proper audio codec
+                "-b:a 192k", // 🔹 Maintain consistent audio bitrate
+                "-r 25", // 🔹 Ensure stable frame rate
+                "-pix_fmt yuv420p", // 🔹 Wide compatibility
+                "-vf crop='min(iw,ih*9/16)':'min(iw*16/9,ih)',scale=1080:1920" // 🔹 Crop & scale to 9:16
+            ])
             .output(outputPath)
-            .on("end", () => resolve(outputPath))
-            .on("error", reject)
+            .on("end", () => {
+                console.log(`✅ Trimmed video saved: ${outputPath}`);
+                resolve(outputPath);
+            })
+            .on("error", (err) => {
+                console.error("❌ FFmpeg trimming error:", err);
+                reject(err);
+            })
             .run();
     });
 };
@@ -193,12 +211,10 @@ const extractLastFrame = (inputPath, outputImagePath) => {
                     timestamps: [lastFrameTime], 
                     filename: path.basename(outputImagePath), 
                     folder: path.dirname(outputImagePath), 
-                    size: "1920x1080" 
+                    size: "1080x1920"  // ✅ Ensure it's 9:16 like the video
                 })
                 .on("end", () => {
                     console.log(`✅ Frame saved as: ${outputImagePath}`);
-                    console.log("Checking contents of tmp directory again...");
-                    fs.readdirSync(path.join(__dirname, "tmp")).forEach(file => console.log(file));
                     resolve(outputImagePath);
                 })
                 .on("error", (err) => {
@@ -212,7 +228,7 @@ const extractLastFrame = (inputPath, outputImagePath) => {
 
 const getAIVideoTaskId = async (imagePath, prompt) => {
     const imageBase64 = imageToBase64(imagePath);
-    const payload = { model: "I2V-01", first_frame_image: `data:image/png;base64,${imageBase64}`, prompt };
+    const payload = { model: "video-01", first_frame_image: `data:image/png;base64,${imageBase64}`, prompt };
     const headers = { authorization: `Bearer ${minimaxApiKey}`, "Content-Type": "application/json" };
 
     const response = await axios.post("https://api.minimaxi.chat/v1/video_generation", payload, { headers });
@@ -280,20 +296,29 @@ const mergeVideos = (video1, video2, outputPath) => {
 
         // Run FFmpeg to merge videos
         ffmpeg()
-            .input(tmpFileList)
-            .inputOptions(["-f concat", "-safe 0"]) // Use concat mode
-            .outputOptions(["-c copy"]) // Copy streams without re-encoding
-            .output(outputPath)
-            .on("end", () => {
-                console.log("✅ Video merging complete:", outputPath);
-                fs.unlinkSync(tmpFileList); // Cleanup temporary file
-                resolve(outputPath);
-            })
-            .on("error", (err) => {
-                console.error("❌ FFmpeg merging error:", err);
-                reject(err);
-            })
-            .run();
+        .input(tmpFileList)
+        .inputOptions(["-f concat", "-safe 0"]) // Use concat mode
+        .outputOptions([
+            "-c:v libx264", // 🔹 Ensure video uses H.264 codec
+            "-preset veryfast", // 🔹 Speed up encoding
+            "-crf 23", // 🔹 Balance quality & file size
+            "-c:a aac", // 🔹 Ensure proper audio codec
+            "-b:a 192k", // 🔹 Ensure audio bitrate consistency
+            "-r 25", // 🔹 Force frame rate consistency
+            "-pix_fmt yuv420p", // 🔹 Ensure wide compatibility
+            "-vf scale=1080:-2,setsar=1,pad=1080:1920:(ow-iw)/2:(oh-ih)/2" // 🔹 Ensure 9:16 aspect ratio
+        ])
+        .output(outputPath)
+        .on("end", () => {
+            console.log("✅ Video merging complete:", outputPath);
+            fs.unlinkSync(tmpFileList); // Cleanup temp file
+            resolve(outputPath);
+        })
+        .on("error", (err) => {
+            console.error("❌ FFmpeg merging error:", err);
+            reject(err);
+        })
+        .run();
     });
 };
 
@@ -411,7 +436,7 @@ const cleanupFiles = (files) => {
     });
 };
 
-const testImage = (tmpFilePath, timestamp) => {
+const testImage = (lastFramePath, timestamp) => {
     const uploadDir = path.resolve("uploads"); // Define upload directory
     if (!fs.existsSync(uploadDir)) {
         fs.mkdirSync(uploadDir, { recursive: true });
