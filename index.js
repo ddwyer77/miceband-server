@@ -83,6 +83,10 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
         }
 
         const task_id = await getAIVideoTaskId(lastFramePath, prompt);
+        if (!task_id || task_id === "") {
+            console.error("❌ Task ID not found:", task_id);
+            return res.status(500).json({ error: "Task ID not found." });
+        }
         console.log("Task ID:", task_id);
 
         const videoBuffer = fs.readFileSync(trimmedVideoPath);
@@ -102,7 +106,7 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
     } catch (error) {
         console.error("❌ Error processing video:", error);
         cleanupFiles([lastFramePath, trimmedVideoPath]);
-        return res.status(500).json({ error: "Internal server error." });
+        return res.status(500).json({ error: error.message });
     }
 });
 
@@ -150,10 +154,10 @@ app.post("/api/complete-video", async (req, res) => {
         const downloadUrl = await uploadAndSaveVideo(combinedVideoPath, { generationType });
         console.log("✅ Video uploaded and saved:", downloadUrl);
 
-        // if (email && email.trim() !== "") {
-        //     console.log(`📧 Sending email to ${email}...`);
-        //     await sendVideoEmail(email, downloadUrl);
-        // }
+        if (email && email.trim() !== "") {
+            console.log(`📧 Sending email to ${email}...`);
+            await sendVideoEmail(email, downloadUrl);
+        }
 
         cleanupFiles([aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath, trimmedVideoPath]);
         return res.status(200).json({ success: true, videoUrl: downloadUrl });
@@ -367,10 +371,6 @@ const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLeng
     });
 };
 
-
-/**
- * Handle Double Generation: Reverse AI video and merge with original
- */
 const handleDoubleGeneration = async (inputVideoPath, outputVideoPath) => {
 
     inputVideoPath = await ensureLocalFile(inputVideoPath, `tmp/video_${Date.now()}.mp4`);
@@ -529,13 +529,14 @@ async function uploadAndSaveVideo(mergedVideoUrl, generationData) {
 async function sendVideoEmail(email, videoUrl) {
     try {
         const emailData = {
-            service_id: process.env.EMAILJS_SERVICE_ID, // EmailJS Service ID
-            template_id: process.env.EMAILJS_TEMPLATE_ID, // EmailJS Template ID
-            user_id: process.env.EMAILJS_PUBLIC_KEY, // EmailJS Public Key
+            service_id: process.env.EMAILJS_SERVICE_ID, 
+            template_id: process.env.EMAILJS_TEMPLATE_ID, 
+            user_id: process.env.EMAILJS_PUBLIC_KEY,
+            accessToken: process.env.EMAILJS_PRIVATE_KEY,
             template_params: {
-                recipient_email: email, // Email of the recipient
+                send_to: email, 
                 video_url: videoUrl,
-                from_name: "Mice Band" // Video URL to be included in the email
+                from_name: "Mice Band"
             },
         };
 
