@@ -11,7 +11,7 @@ const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
 const { uploadGeneratedVideosForFeed } = require("./firebase/upload");
-const { addDocument } = require("./firebase/firestore"); 
+const { addDocument, addErrorLog } = require("./firebase/firestore"); 
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -121,13 +121,9 @@ app.post("/api/complete-video", async (req, res) => {
     let doubleGeneratedVideoPath = null;
 
     try {
-        
-
         console.log("🔄 Fetching AI video...");
         await getAIVideoFile(aiVideoFileId, aiVideoPath);
         let processedVideoPath = aiVideoPath;
-        
-        
 
         // Step 1: Handle double generation if enabled
         if (doubleGeneration) {
@@ -145,7 +141,7 @@ app.post("/api/complete-video", async (req, res) => {
 
         // Step 3: Merge the trimmed video with AI-generated video
         console.log("Merging videos...");
-        
+      
         await mergeVideos(trimmedVideoPath, generatedVideoWithAudioPath, combinedVideoPath);
         console.log("✅ Videos merged:", combinedVideoPath);
 
@@ -169,6 +165,17 @@ app.post("/api/complete-video", async (req, res) => {
         return res.status(200).json({ success: true, videoUrl: downloadUrl });
     } catch (error) {
         console.error("❌ Error completing video:", error);
+
+        try {
+            await addErrorLog("complete-video", error.message, error.stack, {
+                aiVideoFileId,
+                doubleGeneration,
+                email
+            });
+        } catch (error) {
+            console.error("❌ Error logging error:", error);
+        }
+
         const filesToCleanup = [aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath, trimmedVideoPath];
         if (doubleGeneratedVideoPath) filesToCleanup.push(doubleGeneratedVideoPath);
         cleanupFiles(filesToCleanup);

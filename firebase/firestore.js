@@ -41,4 +41,27 @@ async function addDocument(collectionName, downloadUrl, title, generationType) {
     }
 }
 
-module.exports = { addDocument };
+/**
+ * Logs an error to Firestore in the "errors" collection.
+ * @param {string} functionName - The function where the error occurred.
+ * @param {string} message - Error message.
+ * @param {string} stackTrace - Stack trace for debugging.
+ * @param {object} additionalData - Any extra details (optional).
+ */
+async function addErrorLog(functionName, message, stackTrace, additionalData = {}) {
+    try {
+        const errorRef = await addDoc(collection(db, "errors"), {
+            functionName,
+            message,
+            stackTrace,
+            additionalData,
+            timestamp: new Date()
+        });
+
+        console.log(`🚨 Error logged to Firestore: ${errorRef.id}`);
+    } catch (firestoreError) {
+        console.error("🔥 Firestore Logging Failed:", firestoreError);
+    }
+}
+
+module.exports = { addDocument, addErrorLog };
