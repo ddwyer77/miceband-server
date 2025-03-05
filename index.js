@@ -69,6 +69,7 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
         // Step 1: Trim video to user-defined length
         console.log("Trimming video...");
         await trimVideo(inputFilePath, trimmedVideoPath, clipLength);
+        cleanupFiles([inputFilePath]);
 
         // Step 2: Extract last frame
         console.log("Extracting last frame...");
@@ -88,19 +89,18 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
             return res.status(500).json({ error: "Task ID not found." });
         }
         console.log("Task ID:", task_id);
-
-        const videoBuffer = fs.readFileSync(trimmedVideoPath);
+       
         res.setHeader("Content-Type", "video/mp4");
         res.setHeader("Content-Disposition", `attachment; filename="trimmed_video.mp4"`);
 
         res.json({ 
             status: "success", 
             task_id,
-            trimmed_video: videoBuffer.toString("base64"),
+            trimmed_video: trimmedVideoPath,
         });
 
         res.on('finish', () => {
-            cleanupFiles([inputFilePath, lastFramePath, trimmedVideoPath]);
+            cleanupFiles([inputFilePath, lastFramePath]);
         });
 
     } catch (error) {
@@ -111,25 +111,28 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
 });
 
 app.post("/api/complete-video", async (req, res) => {
+    let { aiVideoFileId, audioUrl, doubleGeneration, trimmedVideo, clipLength, generationType, email } = req.body;
+
     const timestamp = Date.now();
     const aiVideoPath = `tmp/ai_generated_${timestamp}.mp4`;
-    const trimmedVideoPath = `tmp/trimmed_${timestamp}.mp4`;
     const generatedVideoWithAudioPath = `tmp/generated_with_audio_${timestamp}.mp4`;
     const combinedVideoPath = `tmp/combined_${timestamp}.mp4`;
+    const trimmedVideoPath = trimmedVideo; 
+    let doubleGeneratedVideoPath = null;
 
     try {
-        let { aiVideoFileId, audioUrl, doubleGeneration, trimmedVideo, clipLength, generationType, email } = req.body;
+        
 
         console.log("🔄 Fetching AI video...");
         await getAIVideoFile(aiVideoFileId, aiVideoPath);
         let processedVideoPath = aiVideoPath;
         
-        saveBase64VideoToFile(trimmedVideo, trimmedVideoPath);
+        
 
         // Step 1: Handle double generation if enabled
         if (doubleGeneration) {
             console.log("🔄 Performing double generation...");
-            const doubleGeneratedVideoPath = aiVideoPath.replace(/\.mp4$/, "_double.mp4");
+            doubleGeneratedVideoPath = aiVideoPath.replace(/\.mp4$/, "_double.mp4");
             processedVideoPath = await handleDoubleGeneration(aiVideoPath, doubleGeneratedVideoPath);
             clipLength = clipLength * 2; // Double the clip length
             console.log("🎥 Double generation completed:", processedVideoPath);
@@ -159,11 +162,16 @@ app.post("/api/complete-video", async (req, res) => {
             await sendVideoEmail(email, downloadUrl);
         }
 
-        cleanupFiles([aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath, trimmedVideoPath]);
+        const filesToCleanup = [aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath, trimmedVideoPath];
+        if (doubleGeneratedVideoPath) filesToCleanup.push(doubleGeneratedVideoPath);
+        cleanupFiles(filesToCleanup);
+        
         return res.status(200).json({ success: true, videoUrl: downloadUrl });
     } catch (error) {
         console.error("❌ Error completing video:", error);
-        cleanupFiles([aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath, trimmedVideoPath]);
+        const filesToCleanup = [aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath, trimmedVideoPath];
+        if (doubleGeneratedVideoPath) filesToCleanup.push(doubleGeneratedVideoPath);
+        cleanupFiles(filesToCleanup);
         return res.status(500).json({ error: "Internal server error." });
     }
 });
@@ -243,7 +251,6 @@ const getAIVideoTaskId = async (imagePath, prompt) => {
 
 const getAIVideoFile = async (fileId, outputPath) => {
     const headers = { Authorization: `Bearer ${minimaxApiKey}` };
-
     console.log(`🚀 Fetching AI-generated video with File ID: ${fileId}`);
 
     // Step 1: Get the video metadata (download URL)
@@ -256,20 +263,22 @@ const getAIVideoFile = async (fileId, outputPath) => {
 
     const downloadUrl = fileRes.data.file.download_url;
 
-    // Step 2: Download the actual video file
-    console.log("⬇️ Downloading AI-generated video...");
-    const videoData = await axios.get(downloadUrl, { responseType: "arraybuffer" });
+    // Step 2: Stream the video download
+    console.log("⬇️ Streaming AI-generated video to file...");
+    const response = await axios({ method: "GET", url: downloadUrl, responseType: "stream" });
 
-    // Step 3: Save video to output path
-    fs.writeFileSync(outputPath, videoData.data);
-    console.log("✅ AI Video saved to:", outputPath);
+    const writer = fs.createWriteStream(outputPath);
+    response.data.pipe(writer);
 
-    return outputPath;
+    return new Promise((resolve, reject) => {
+        writer.on("finish", () => {
+            console.log("✅ AI Video saved to:", outputPath);
+            resolve(outputPath);
+        });
+        writer.on("error", reject);
+    });
 };
 
-/**
- * Merge two videos
- */
 const mergeVideos = (video1, video2, outputPath) => {
     // saveToTestFolder( Date.now(), [video1, video2]);
     return new Promise((resolve, reject) => {
@@ -326,6 +335,19 @@ const mergeVideos = (video1, video2, outputPath) => {
     });
 };
 
+async function downloadVideo(url, filePath) {
+    console.log("⬇️ Downloading video...");
+    const response = await axios({ method: "GET", url, responseType: "stream" });
+
+    const writer = fs.createWriteStream(filePath);
+    response.data.pipe(writer);
+
+    return new Promise((resolve, reject) => {
+        writer.on("finish", resolve);
+        writer.on("error", reject);
+    });
+}
+
 /**
  * Add background music to video
  */
@@ -374,10 +396,9 @@ const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLeng
 const handleDoubleGeneration = async (inputVideoPath, outputVideoPath) => {
 
     inputVideoPath = await ensureLocalFile(inputVideoPath, `tmp/video_${Date.now()}.mp4`);
+    const reversedVideoPath = inputVideoPath.replace(/\.mp4$/, "_reversed.mp4");
 
     return new Promise((resolve, reject) => {
-        const reversedVideoPath = inputVideoPath.replace(/\.mp4$/, "_reversed.mp4");
-
         console.log("🔄 Checking if AI video has audio:", inputVideoPath);
 
         // Step 1: Check if the input video has an audio stream
@@ -422,12 +443,11 @@ const handleDoubleGeneration = async (inputVideoPath, outputVideoPath) => {
                 .on("error", reject)
                 .run();
         });
-    });
+    }).finally(() => {
+        cleanupFiles([inputVideoPath, reversedVideoPath]);
+    })
 };
 
-/**
- * Cleanup temporary files
- */
 const cleanupFiles = (files) => {
     files.forEach((file) => {
         if (fs.existsSync(file)) {
@@ -468,20 +488,6 @@ const saveToTestFolder = (timestamp, videoPaths) => {
 
     console.log("✅ All files moved to uploads/ for preview.");
     return savedFiles;
-};
-
-
-const saveBase64VideoToFile = (base64String, filePath) => {
-    try {
-        console.log("🔄 Decoding Base64 video...");
-        const videoBuffer = Buffer.from(base64String, "base64");
-        fs.writeFileSync(filePath, videoBuffer);
-        console.log("✅ Trimmed video saved:", filePath);
-        return filePath;
-    } catch (error) {
-        console.error("❌ Error saving Base64 video:", error);
-        throw new Error("Failed to save Base64 video.");
-    }
 };
 
 const ensureLocalFile = async (videoPath, localPath) => {
