@@ -297,13 +297,11 @@ const mergeVideos = (video1, video2, outputPath) => {
             console.log("Creating /tmp directory...");
             fs.mkdirSync(tmpDir, { recursive: true });
         }
-
-        // Define the file list path
-        const tmpFileList = path.join(__dirname, "video_list.txt");
+      
+        const tmpFileList = path.join("/tmp", "video_list.txt");
 
         console.log("📄 Writing file list to:", tmpFileList);
 
-        // Create a temporary file list for FFmpeg
         try {
             fs.writeFileSync(
                 tmpFileList,
