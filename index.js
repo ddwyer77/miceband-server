@@ -46,6 +46,7 @@ const imageToBase64 = (filePath) => {
 };
 
 app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) => {
+    logMemoryUsage("Before get task id");
     const tmpDir = "/tmp";
     const timestamp = Date.now();
     const lastFramePath = path.join(tmpDir, `last_frame_${timestamp}.jpg`);
@@ -69,6 +70,7 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
         // Step 1: Trim video to user-defined length
         console.log("Trimming video...");
         await trimVideo(inputFilePath, trimmedVideoPath, clipLength);
+
         cleanupFiles([inputFilePath]);
 
         // Step 2: Extract last frame
@@ -98,6 +100,7 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
             task_id,
             trimmed_video: trimmedVideoPath,
         });
+        logMemoryUsage("After get task id");
 
         res.on('finish', () => {
             cleanupFiles([inputFilePath, lastFramePath]);
@@ -111,6 +114,7 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
 });
 
 app.post("/api/complete-video", async (req, res) => {
+    logMemoryUsage("Before Complete");
     let { aiVideoFileId, audioUrl, doubleGeneration, trimmedVideo, clipLength, generationType, email } = req.body;
 
     const timestamp = Date.now();
@@ -138,29 +142,26 @@ app.post("/api/complete-video", async (req, res) => {
         console.log("Adding background audio...");
         await addBackgroundMusic(processedVideoPath, generatedVideoWithAudioPath, audioUrl, timestamp, clipLength);
         console.log("✅ Audio added:", generatedVideoWithAudioPath);
+        cleanupFiles([processedVideoPath]);
 
         // Step 3: Merge the trimmed video with AI-generated video
         console.log("Merging videos...");
       
         await mergeVideos(trimmedVideoPath, generatedVideoWithAudioPath, combinedVideoPath);
-        console.log("✅ Videos merged:", combinedVideoPath);
-
-        console.log("✅ Video processing complete!", combinedVideoPath);
-
-        //TODO: Comment out
-        // saveToTestFolder(timestamp, [trimmedVideoPath, aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath])
-
+        cleanupFiles([trimmedVideoPath, generatedVideoWithAudioPath, aiVideoPath]);
+        
         const downloadUrl = await uploadAndSaveVideo(combinedVideoPath, { generationType });
         console.log("✅ Video uploaded and saved:", downloadUrl);
-
+        
         if (email && email.trim() !== "") {
             console.log(`📧 Sending email to ${email}...`);
             await sendVideoEmail(email, downloadUrl);
         }
 
-        const filesToCleanup = [aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath, trimmedVideoPath];
+        const filesToCleanup = [combinedVideoPath];
         if (doubleGeneratedVideoPath) filesToCleanup.push(doubleGeneratedVideoPath);
         cleanupFiles(filesToCleanup);
+        logMemoryUsage("After Complete");
         
         return res.status(200).json({ success: true, videoUrl: downloadUrl });
     } catch (error) {
@@ -176,7 +177,7 @@ app.post("/api/complete-video", async (req, res) => {
             console.error("❌ Error logging error:", error);
         }
 
-        const filesToCleanup = [aiVideoPath, generatedVideoWithAudioPath, combinedVideoPath, trimmedVideoPath];
+        const filesToCleanup = [combinedVideoPath];
         if (doubleGeneratedVideoPath) filesToCleanup.push(doubleGeneratedVideoPath);
         cleanupFiles(filesToCleanup);
         return res.status(500).json({ error: "Internal server error." });
@@ -195,7 +196,7 @@ const trimVideo = (inputPath, outputPath, duration) => {
             .setDuration(duration)
             .outputOptions([
                 "-c:v libx264", // 🔹 H.264 encoding for compatibility
-                "-preset veryfast", // 🔹 Faster processing
+                "-preset ultrafast", // 🔹 Faster processing
                 "-crf 23", // 🔹 Balanced quality & file size
                 "-c:a aac", // 🔹 Ensure proper audio codec
                 "-b:a 192k", // 🔹 Maintain consistent audio bitrate
@@ -280,6 +281,7 @@ const getAIVideoFile = async (fileId, outputPath) => {
     return new Promise((resolve, reject) => {
         writer.on("finish", () => {
             console.log("✅ AI Video saved to:", outputPath);
+            writer.close();
             resolve(outputPath);
         });
         writer.on("error", reject);
@@ -320,7 +322,7 @@ const mergeVideos = (video1, video2, outputPath) => {
         .inputOptions(["-f concat", "-safe 0"]) // Use concat mode
         .outputOptions([
             "-c:v libx264", // 🔹 Ensure video uses H.264 codec
-            "-preset veryfast", // 🔹 Speed up encoding
+            "-preset ultrafast", // 🔹 Speed up encoding
             "-crf 23", // 🔹 Balance quality & file size
             "-c:a aac", // 🔹 Ensure proper audio codec
             "-b:a 192k", // 🔹 Ensure audio bitrate consistency
@@ -441,6 +443,7 @@ const handleDoubleGeneration = async (inputVideoPath, outputVideoPath) => {
                     try {
                         await mergeVideos(inputVideoPath, reversedVideoPath, outputVideoPath);
                         console.log("✅ Double generation complete:", outputVideoPath);
+                        cleanupFiles([inputVideoPath, reversedVideoPath]);
                         resolve(outputVideoPath);
                     } catch (mergeError) {
                         console.error("❌ Error merging videos:", mergeError);
@@ -450,8 +453,6 @@ const handleDoubleGeneration = async (inputVideoPath, outputVideoPath) => {
                 .on("error", reject)
                 .run();
         });
-    }).finally(() => {
-        cleanupFiles([inputVideoPath, reversedVideoPath]);
     })
 };
 
@@ -566,6 +567,41 @@ async function sendVideoEmail(email, videoUrl) {
         console.error("❌ Error sending email:", error);
     }
 }
+
+const getVideoMetadata = (videoPath) => {
+    return new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(videoPath, (err, metadata) => {
+            if (err) {
+                return reject(err);
+            }
+
+            const videoStream = metadata.streams.find(s => s.codec_type === "video");
+
+            if (!videoStream) {
+                return reject(new Error("No video stream found"));
+            }
+
+            resolve({
+                format: metadata.format.format_name,
+                duration: metadata.format.duration,
+                size: metadata.format.size,
+                width: videoStream.width,
+                height: videoStream.height,
+                codec: videoStream.codec_name,
+                bitrate: metadata.format.bit_rate
+            });
+        });
+    });
+};
+
+const logMemoryUsage = (label) => {
+    const used = process.memoryUsage();
+    console.log(`📊 ${label} - Memory Usage (MB):`);
+    console.log(`  🟢 RSS: ${(used.rss / 1024 / 1024).toFixed(2)} MB`);
+    console.log(`  🔵 Heap Total: ${(used.heapTotal / 1024 / 1024).toFixed(2)} MB`);
+    console.log(`  🔴 Heap Used: ${(used.heapUsed / 1024 / 1024).toFixed(2)} MB`);
+    console.log(`  🟠 External: ${(used.external / 1024 / 1024).toFixed(2)} MB`);
+};
 
 app.listen(port, () => {
     console.log(`🚀 Server running on port ${port}`);
