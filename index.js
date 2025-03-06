@@ -289,7 +289,7 @@ const getAIVideoFile = async (fileId, outputPath) => {
 };
 
 const mergeVideos = (video1, video2, outputPath) => {
-    // saveToTestFolder( Date.now(), [video1, video2]);
+    const timestamp = Date.now();
     return new Promise((resolve, reject) => {
         const tmpDir = "/tmp"; // Ensure using a valid temp directory
 
@@ -297,8 +297,8 @@ const mergeVideos = (video1, video2, outputPath) => {
             console.log("Creating /tmp directory...");
             fs.mkdirSync(tmpDir, { recursive: true });
         }
-      
-        const tmpFileList = path.join("/tmp", "video_list.txt");
+
+        const tmpFileList = path.join(tmpDir, `video_list_${timestamp}.txt`);
 
         console.log("📄 Writing file list to:", tmpFileList);
 
@@ -331,7 +331,7 @@ const mergeVideos = (video1, video2, outputPath) => {
         .output(outputPath)
         .on("end", () => {
             console.log("✅ Video merging complete:", outputPath);
-            fs.unlinkSync(tmpFileList); // Cleanup temp file
+            // fs.unlinkSync(tmpFileList); // Cleanup temp file
             resolve(outputPath);
         })
         .on("error", (err) => {
