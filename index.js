@@ -11,7 +11,7 @@ const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
 const { uploadGeneratedVideosForFeed } = require("./firebase/upload");
-const { addDocument, addErrorLog } = require("./firebase/firestore"); 
+const { addDocument, addErrorLog, uploadVideoToFirebase, deleteVideoFromFirebase } = require("./firebase/firestore"); 
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -55,8 +55,8 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
     try {
         if (!req.file) return res.status(400).json({ error: "No video uploaded" });
 
+        console.log("Init get task id...");
         const { clipLength, prompt } = req.body;
-        console.log("Processing video...");
         const inputFilePath = path.resolve(req.file.path); 
         
         if (!fs.existsSync(tmpDir)) {
@@ -67,18 +67,16 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
             console.error("❌ Input file does not exist:", inputFilePath);
             return res.status(500).json({ error: "Input file is missing." });
         }
-        // Step 1: Trim video to user-defined length
+     
         console.log("Trimming video...");
         await trimVideo(inputFilePath, trimmedVideoPath, clipLength);
 
-        cleanupFiles([inputFilePath]);
-
-        // Step 2: Extract last frame
         console.log("Extracting last frame...");
         await extractLastFrame(trimmedVideoPath, lastFramePath);
         console.log("Last frame extracted:", lastFramePath);
 
-        // testImage(lastFramePath, timestamp);
+        const uploadedTrimmedVideo = await uploadVideoToFirebase(trimmedVideoPath);
+        cleanupFiles([trimmedVideoPath]);
       
         if (!fs.existsSync(lastFramePath)) {
             console.error("❌ File does not exist:", lastFramePath);
@@ -98,7 +96,7 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
         res.json({ 
             status: "success", 
             task_id,
-            trimmed_video: trimmedVideoPath,
+            trimmed_video: uploadedTrimmedVideo,
         });
         logMemoryUsage("After get task id");
 
@@ -121,7 +119,7 @@ app.post("/api/complete-video", async (req, res) => {
     const aiVideoPath = `tmp/ai_generated_${timestamp}.mp4`;
     const generatedVideoWithAudioPath = `tmp/generated_with_audio_${timestamp}.mp4`;
     const combinedVideoPath = `tmp/combined_${timestamp}.mp4`;
-    const trimmedVideoPath = trimmedVideo; 
+    const trimmedVideoPath = `tmp/downloadedTrimmedVideo_${timestamp}.mp4`;
     let doubleGeneratedVideoPath = null;
 
     try {
@@ -144,6 +142,8 @@ app.post("/api/complete-video", async (req, res) => {
         console.log("✅ Audio added:", generatedVideoWithAudioPath);
         cleanupFiles([processedVideoPath]);
 
+        await downloadVideo(trimmedVideo, trimmedVideoPath);
+
         // Step 3: Merge the trimmed video with AI-generated video
         console.log("Merging videos...");
       
@@ -161,6 +161,7 @@ app.post("/api/complete-video", async (req, res) => {
         const filesToCleanup = [combinedVideoPath];
         if (doubleGeneratedVideoPath) filesToCleanup.push(doubleGeneratedVideoPath);
         cleanupFiles(filesToCleanup);
+        deleteVideoFromFirebase(trimmedVideo);
         logMemoryUsage("After Complete");
         
         return res.status(200).json({ success: true, videoUrl: downloadUrl });
@@ -180,6 +181,7 @@ app.post("/api/complete-video", async (req, res) => {
         const filesToCleanup = [combinedVideoPath];
         if (doubleGeneratedVideoPath) filesToCleanup.push(doubleGeneratedVideoPath);
         cleanupFiles(filesToCleanup);
+        deleteVideoFromFirebase(trimmedVideo);
         return res.status(500).json({ error: "Internal server error." });
     }
 });

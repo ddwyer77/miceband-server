@@ -1,5 +1,7 @@
 const { getFirestore, collection, addDoc } = require("firebase/firestore");
+const { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } = require("firebase/storage");
 const { initializeApp } = require("firebase/app");
+const fs = require("fs");
 
 // Firebase Config (Using Correct Environment Variables)
 const firebaseConfig = {
@@ -64,4 +66,69 @@ async function addErrorLog(functionName, message, stackTrace, additionalData = {
     }
 }
 
-module.exports = { addDocument, addErrorLog };
+/**
+ * Uploads a video file to Firebase Storage.
+ * @param {string} localFilePath - Path to the local video file.
+ * @returns {Promise<string>} - The download URL of the uploaded video.
+ */
+async function uploadVideoToFirebase(localFilePath) {
+    try {
+        const storage = getStorage(firebaseApp);
+        const timestamp = Date.now();
+        const fileName = `video-${timestamp}.mp4`;
+        const storagePath = `videos/${fileName}`;
+        const storageRef = ref(storage, storagePath);
+
+        // Read file data
+        const fileBuffer = fs.readFileSync(localFilePath);
+
+        // Upload file to Firebase Storage
+        await uploadBytes(storageRef, fileBuffer);
+        console.log(`✅ Video uploaded to Firebase Storage: ${storagePath}`);
+
+        // Get the download URL
+        const downloadUrl = await getDownloadURL(storageRef);
+        console.log(`📥 Download URL: ${downloadUrl}`);
+
+        return downloadUrl;
+    } catch (error) {
+        console.error("❌ Error uploading video to Firebase:", error);
+        throw error;
+    }
+}
+
+/**
+ * Deletes a video from Firebase Storage.
+ * @param {string} videoUrl - The Firebase Storage URL of the video to delete.
+ * @returns {Promise<void>}
+ */
+async function deleteVideoFromFirebase(videoUrl) {
+    try {
+        if (!videoUrl.includes("firebasestorage.googleapis.com")) {
+            throw new Error("Invalid Firebase Storage URL");
+        }
+
+        // Extract the storage path from the URL
+        const decodedUrl = decodeURIComponent(videoUrl);
+        const match = decodedUrl.match(/o\/(.+?)\?/);
+
+        if (!match || !match[1]) {
+            throw new Error("Unable to extract storage path from URL");
+        }
+
+        const storagePath = match[1]; // Extracted path, e.g., "generatedVideosUnapproved/video-12345.mp4"
+
+        const storage = getStorage();
+        const storageRef = ref(storage, storagePath);
+
+        // Delete the video from Firebase Storage
+        await deleteObject(storageRef);
+        console.log(`✅ Video deleted from Firebase Storage: ${storagePath}`);
+    } catch (error) {
+        console.error("❌ Error deleting video from Firebase:", error);
+        throw error;
+    }
+}
+
+
+module.exports = { addDocument, addErrorLog, uploadVideoToFirebase, deleteVideoFromFirebase };
