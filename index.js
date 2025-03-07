@@ -152,11 +152,6 @@ app.post("/api/complete-video", async (req, res) => {
         
         const downloadUrl = await uploadAndSaveVideo(combinedVideoPath, { generationType });
         console.log("✅ Video uploaded and saved:", downloadUrl);
-        
-        if (email && email.trim() !== "") {
-            console.log(`📧 Sending email to ${email}...`);
-            await sendVideoEmail(email, downloadUrl);
-        }
 
         const filesToCleanup = [combinedVideoPath];
         if (doubleGeneratedVideoPath) filesToCleanup.push(doubleGeneratedVideoPath);
@@ -164,7 +159,13 @@ app.post("/api/complete-video", async (req, res) => {
         deleteVideoFromFirebase(trimmedVideo);
         logMemoryUsage("After Complete");
         
-        return res.status(200).json({ success: true, videoUrl: downloadUrl });
+        res.status(200).json({ success: true, videoUrl: downloadUrl });
+
+        // if (email && email.trim() !== "") {
+        //     sendVideoEmail(email, downloadUrl).catch(err => {
+        //         console.error("❌ Error sending email:", err);
+        //     });
+        // }
     } catch (error) {
         console.error("❌ Error completing video:", error);
 
