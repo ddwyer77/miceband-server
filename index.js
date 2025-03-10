@@ -251,7 +251,7 @@ const extractLastFrame = (inputPath, outputImagePath) => {
 
 const getAIVideoTaskId = async (imagePath, prompt) => {
     const imageBase64 = imageToBase64(imagePath);
-    const payload = { model: "video-01", first_frame_image: `data:image/png;base64,${imageBase64}`, prompt };
+    const payload = { model: "12V-01", first_frame_image: `data:image/png;base64,${imageBase64}`, prompt };
     const headers = { authorization: `Bearer ${minimaxApiKey}`, "Content-Type": "application/json" };
 
     const response = await axios.post("https://api.minimaxi.chat/v1/video_generation", payload, { headers });
