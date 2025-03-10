@@ -378,7 +378,7 @@ const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLeng
             // Merge audio with video
             ffmpeg(videoPath)
                 .input(audioPath)
-                .outputOptions(`-t ${clipLength}`)
+                .outputOptions(['-shortest'])
                 .output(outputPath)
                 .on("end", () => {
                     // Check if file was created before resolving
