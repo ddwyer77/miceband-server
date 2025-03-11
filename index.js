@@ -256,6 +256,7 @@ const getAIVideoTaskId = async (imagePath, prompt) => {
 
     const response = await axios.post("https://api.minimaxi.chat/v1/video_generation", payload, { headers });
     const taskId = response.data.task_id;
+    console.log("✅ Task ID:", taskId);
 
     return taskId;
 };
