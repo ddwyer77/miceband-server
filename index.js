@@ -25,8 +25,6 @@ const allowedOrigins = [
     "https://mice-band-5d7efe3ee4f2.herokuapp.com"
 ];
 
-app.use(express.json({ limit: "150mb" }));
-app.use(express.urlencoded({limit: "150mb", extended: true }));
 app.use(cors({
     origin: function (origin, callback) {
         if (!origin || allowedOrigins.includes(origin) || /^http:\/\/localhost(:\d+)?$/.test(origin)) {
@@ -36,8 +34,12 @@ app.use(cors({
         }
     },
     credentials: true,
+    methods: "GET, POST, PUT, DELETE, OPTIONS",
+    allowedHeaders: "Origin, X-Requested-With, Content-Type, Accept, Authorization"
 }));
 
+app.use(express.json({ limit: "150mb" }));
+app.use(express.urlencoded({limit: "150mb", extended: true }));
 
 const minimaxApiKey = process.env.API_KEY_MINIMAX;
 
@@ -379,7 +381,7 @@ const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLeng
             // Merge audio with video
             ffmpeg(videoPath)
                 .input(audioPath)
-                .outputOptions(['-shortest'])
+                .outputOptions(`-t ${clipLength}`)
                 .output(outputPath)
                 .on("end", () => {
                     // Check if file was created before resolving
