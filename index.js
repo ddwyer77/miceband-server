@@ -14,7 +14,7 @@ const { uploadGeneratedVideosForFeed } = require("./firebase/upload");
 const { addDocument, addErrorLog, uploadVideoToFirebase, deleteVideoFromFirebase } = require("./firebase/firestore"); 
 
 const app = express();
-const port = process.env.PORT || 5000;
+const port = process.env.PORT || 8080;
 
 // Configure multer for file uploads
 const upload = multer({ dest: "tmp/" });

@@ -52,3 +52,5 @@ coverage/
 jest/
 
 uploads/
+
+app.yaml
