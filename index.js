@@ -48,7 +48,6 @@ const imageToBase64 = (filePath) => {
 };
 
 app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) => {
-    logMemoryUsage("Before get task id");
     const tmpDir = "/tmp";
     const timestamp = Date.now();
     const lastFramePath = path.join(tmpDir, `last_frame_${timestamp}.jpg`);
@@ -100,7 +99,6 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
             task_id,
             trimmed_video: uploadedTrimmedVideo,
         });
-        logMemoryUsage("After get task id");
 
         res.on('finish', () => {
             cleanupFiles([inputFilePath, lastFramePath]);
@@ -114,7 +112,6 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
 });
 
 app.post("/api/complete-video", async (req, res) => {
-    logMemoryUsage("Before Complete");
     let { aiVideoFileId, audioUrl, doubleGeneration, trimmedVideo, clipLength, generationType, email } = req.body;
 
     const timestamp = Date.now();
@@ -159,7 +156,6 @@ app.post("/api/complete-video", async (req, res) => {
         if (doubleGeneratedVideoPath) filesToCleanup.push(doubleGeneratedVideoPath);
         cleanupFiles(filesToCleanup);
         deleteVideoFromFirebase(trimmedVideo);
-        logMemoryUsage("After Complete");
         
         res.status(200).json({ success: true, videoUrl: downloadUrl });
 
@@ -596,15 +592,6 @@ const getVideoMetadata = (videoPath) => {
             });
         });
     });
-};
-
-const logMemoryUsage = (label) => {
-    const used = process.memoryUsage();
-    console.log(`📊 ${label} - Memory Usage (MB):`);
-    console.log(`  🟢 RSS: ${(used.rss / 1024 / 1024).toFixed(2)} MB`);
-    console.log(`  🔵 Heap Total: ${(used.heapTotal / 1024 / 1024).toFixed(2)} MB`);
-    console.log(`  🔴 Heap Used: ${(used.heapUsed / 1024 / 1024).toFixed(2)} MB`);
-    console.log(`  🟠 External: ${(used.external / 1024 / 1024).toFixed(2)} MB`);
 };
 
 app.listen(port, () => {
