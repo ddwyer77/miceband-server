@@ -17,7 +17,7 @@ const app = express();
 const port = process.env.PORT || 8080;
 
 // Configure multer for file uploads
-const upload = multer({ dest: "tmp/" });
+const upload = multer({ dest: "/tmp/" });
 
 const allowedOrigins = [
     "https://miceband.com",
@@ -46,6 +46,10 @@ const minimaxApiKey = process.env.API_KEY_MINIMAX;
 const imageToBase64 = (filePath) => {
     return fs.readFileSync(filePath, { encoding: "base64" });
 };
+
+app.get("/", (req, res) => {
+    res.send("✅ Miceband server is running!");
+  });
 
 app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) => {
     const tmpDir = "/tmp";
@@ -115,10 +119,10 @@ app.post("/api/complete-video", async (req, res) => {
     let { aiVideoFileId, audioUrl, doubleGeneration, trimmedVideo, clipLength, generationType, email } = req.body;
 
     const timestamp = Date.now();
-    const aiVideoPath = `tmp/ai_generated_${timestamp}.mp4`;
-    const generatedVideoWithAudioPath = `tmp/generated_with_audio_${timestamp}.mp4`;
-    const combinedVideoPath = `tmp/combined_${timestamp}.mp4`;
-    const trimmedVideoPath = `tmp/downloadedTrimmedVideo_${timestamp}.mp4`;
+    const aiVideoPath = `/tmp/ai_generated_${timestamp}.mp4`;
+    const generatedVideoWithAudioPath = `/tmp/generated_with_audio_${timestamp}.mp4`;
+    const combinedVideoPath = `/tmp/combined_${timestamp}.mp4`;
+    const trimmedVideoPath = `/tmp/downloadedTrimmedVideo_${timestamp}.mp4`;
     let doubleGeneratedVideoPath = null;
 
     try {
@@ -364,7 +368,7 @@ const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLeng
     return new Promise(async (resolve, reject) => {
         try {
             // Ensure the /tmp directory exists
-            const tmpDir = path.join(__dirname, "tmp");
+            const tmpDir = "/tmp";
             if (!fs.existsSync(tmpDir)) {
                 fs.mkdirSync(tmpDir, { recursive: true });
             }
@@ -377,7 +381,15 @@ const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLeng
             // Merge audio with video
             ffmpeg(videoPath)
                 .input(audioPath)
-                .outputOptions(`-t ${clipLength}`)
+                .outputOptions([
+                    `-t ${clipLength}`,
+                    "-preset ultrafast",       
+                    "-shortest",               
+                    "-c:v libx264",
+                    "-c:a aac",
+                    "-b:a 192k",
+                    "-pix_fmt yuv420p"
+                ])
                 .output(outputPath)
                 .on("end", () => {
                     // Check if file was created before resolving
@@ -404,7 +416,7 @@ const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLeng
 
 const handleDoubleGeneration = async (inputVideoPath, outputVideoPath) => {
 
-    inputVideoPath = await ensureLocalFile(inputVideoPath, `tmp/video_${Date.now()}.mp4`);
+    inputVideoPath = await ensureLocalFile(inputVideoPath, `/tmp/video_${Date.now()}.mp4`);
     const reversedVideoPath = inputVideoPath.replace(/\.mp4$/, "_reversed.mp4");
 
     return new Promise((resolve, reject) => {
@@ -523,7 +535,7 @@ async function uploadAndSaveVideo(mergedVideoUrl, generationData) {
 
     try {
         // Ensure the video exists locally before uploading
-        const localVideoPath = await ensureLocalFile(mergedVideoUrl, `tmp/${videoTitle}.mp4`);
+        const localVideoPath = await ensureLocalFile(mergedVideoUrl, `/tmp/${videoTitle}.mp4`);
 
         // Upload video to Firebase Storage
         const downloadUrl = await uploadGeneratedVideosForFeed(localVideoPath, storagePath);
