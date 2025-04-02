@@ -78,8 +78,8 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
 
         console.log("Extracting last frame...");
         await extractLastFrame(trimmedVideoPath, lastFramePath);
-        console.log("Last frame extracted:", lastFramePath);
 
+        console.log("Uploading trimmed video...");
         const uploadedTrimmedVideo = await uploadVideoToFirebase(trimmedVideoPath);
         cleanupFiles([trimmedVideoPath]);
       
@@ -116,8 +116,8 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
 });
 
 app.post("/api/complete-video", async (req, res) => {
+    const startTime = Date.now();
     let { aiVideoFileId, audioUrl, doubleGeneration, trimmedVideo, clipLength, generationType, email } = req.body;
-
     const timestamp = Date.now();
     const aiVideoPath = `/tmp/ai_generated_${timestamp}.mp4`;
     const generatedVideoWithAudioPath = `/tmp/generated_with_audio_${timestamp}.mp4`;
@@ -126,7 +126,7 @@ app.post("/api/complete-video", async (req, res) => {
     let doubleGeneratedVideoPath = null;
 
     try {
-        console.log("🔄 Fetching AI video...");
+        console.log("Initializing complete-video route...");
         await getAIVideoFile(aiVideoFileId, aiVideoPath);
         let processedVideoPath = aiVideoPath;
 
@@ -160,6 +160,9 @@ app.post("/api/complete-video", async (req, res) => {
         if (doubleGeneratedVideoPath) filesToCleanup.push(doubleGeneratedVideoPath);
         cleanupFiles(filesToCleanup);
         deleteVideoFromFirebase(trimmedVideo);
+
+        const totalSeconds = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`⏱️ /api/complete-video completed in ${totalSeconds} seconds`);
         
         res.status(200).json({ success: true, videoUrl: downloadUrl });
 
@@ -170,7 +173,7 @@ app.post("/api/complete-video", async (req, res) => {
         // }
     } catch (error) {
         console.error("❌ Error completing video:", error);
-
+        console.log(`⏱️ /api/complete-video completed in ${totalSeconds} seconds`);
         try {
             await addErrorLog("complete-video", error.message, error.stack, {
                 aiVideoFileId,
@@ -211,7 +214,6 @@ const trimVideo = (inputPath, outputPath, duration) => {
             ])
             .output(outputPath)
             .on("end", () => {
-                console.log(`✅ Trimmed video saved: ${outputPath}`);
                 resolve(outputPath);
             })
             .on("error", (err) => {
@@ -229,8 +231,6 @@ const extractLastFrame = (inputPath, outputImagePath) => {
             const duration = metadata.format.duration;
             const lastFrameTime = Math.max(0, duration - 0.1);
 
-            console.log(`🔄 Extracting last frame at: ${lastFrameTime}s`);
-
             ffmpeg(inputPath)
                 .screenshots({ 
                     timestamps: [lastFrameTime], 
@@ -239,7 +239,6 @@ const extractLastFrame = (inputPath, outputImagePath) => {
                     size: "1080x1920"  // ✅ Ensure it's 9:16 like the video
                 })
                 .on("end", () => {
-                    console.log(`✅ Frame saved as: ${outputImagePath}`);
                     resolve(outputImagePath);
                 })
                 .on("error", (err) => {
@@ -258,15 +257,12 @@ const getAIVideoTaskId = async (imagePath, prompt) => {
 
     const response = await axios.post("https://api.minimaxi.chat/v1/video_generation", payload, { headers });
     const taskId = response.data.task_id;
-    console.log("✅ Task ID:", taskId);
 
     return taskId;
 };
 
 const getAIVideoFile = async (fileId, outputPath) => {
     const headers = { Authorization: `Bearer ${minimaxApiKey}` };
-    console.log(`🚀 Fetching AI-generated video with File ID: ${fileId}`);
-
     // Step 1: Get the video metadata (download URL)
     const fileRes = await axios.get(`https://api.minimaxi.chat/v1/files/retrieve?file_id=${fileId}`, { headers });
 
@@ -276,9 +272,6 @@ const getAIVideoFile = async (fileId, outputPath) => {
     }
 
     const downloadUrl = fileRes.data.file.download_url;
-
-    // Step 2: Stream the video download
-    console.log("⬇️ Streaming AI-generated video to file...");
     const response = await axios({ method: "GET", url: downloadUrl, responseType: "stream" });
 
     const writer = fs.createWriteStream(outputPath);
@@ -286,7 +279,6 @@ const getAIVideoFile = async (fileId, outputPath) => {
 
     return new Promise((resolve, reject) => {
         writer.on("finish", () => {
-            console.log("✅ AI Video saved to:", outputPath);
             writer.close();
             resolve(outputPath);
         });
@@ -300,13 +292,10 @@ const mergeVideos = (video1, video2, outputPath) => {
         const tmpDir = "/tmp"; // Ensure using a valid temp directory
 
         if (!fs.existsSync(tmpDir)) {
-            console.log("Creating /tmp directory...");
             fs.mkdirSync(tmpDir, { recursive: true });
         }
 
         const tmpFileList = path.join(tmpDir, `video_list_${timestamp}.txt`);
-
-        console.log("📄 Writing file list to:", tmpFileList);
 
         try {
             fs.writeFileSync(
@@ -317,10 +306,7 @@ const mergeVideos = (video1, video2, outputPath) => {
             console.error("❌ Error writing file list:", error);
             return reject(error);
         }
-
-        console.log("✅ File list created successfully.");
-
-        // Run FFmpeg to merge videos
+  
         ffmpeg()
         .input(tmpFileList)
         .inputOptions(["-f concat", "-safe 0"]) // Use concat mode
@@ -336,7 +322,6 @@ const mergeVideos = (video1, video2, outputPath) => {
         ])
         .output(outputPath)
         .on("end", () => {
-            console.log("✅ Video merging complete:", outputPath);
             // fs.unlinkSync(tmpFileList); // Cleanup temp file
             resolve(outputPath);
         })
@@ -349,9 +334,7 @@ const mergeVideos = (video1, video2, outputPath) => {
 };
 
 async function downloadVideo(url, filePath) {
-    console.log("⬇️ Downloading video...");
     const response = await axios({ method: "GET", url, responseType: "stream" });
-
     const writer = fs.createWriteStream(filePath);
     response.data.pipe(writer);
 
@@ -361,9 +344,6 @@ async function downloadVideo(url, filePath) {
     });
 }
 
-/**
- * Add background music to video
- */
 const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLength) => {
     return new Promise(async (resolve, reject) => {
         try {
@@ -394,7 +374,6 @@ const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLeng
                 .on("end", () => {
                     // Check if file was created before resolving
                     if (fs.existsSync(outputPath)) {
-                        console.log("✅ Audio successfully added:", outputPath);
                         fs.unlinkSync(audioPath); // Cleanup audio file
                         resolve(outputPath);
                     } else {
@@ -420,19 +399,12 @@ const handleDoubleGeneration = async (inputVideoPath, outputVideoPath) => {
     const reversedVideoPath = inputVideoPath.replace(/\.mp4$/, "_reversed.mp4");
 
     return new Promise((resolve, reject) => {
-        console.log("🔄 Checking if AI video has audio:", inputVideoPath);
-
-        // Step 1: Check if the input video has an audio stream
         ffmpeg.ffprobe(inputVideoPath, (err, metadata) => {
             if (err) {
                 return reject("❌ Error probing video metadata: " + err);
             }
 
             const hasAudio = metadata.streams.some(stream => stream.codec_type === "audio");
-
-            console.log(`🎵 Audio detected: ${hasAudio}`);
-
-            // Step 2: Build the filtergraph dynamically
             let filterGraph = "[0:v]reverse[v]";
             let outputOptions = ["-map", "[v]"];
 
@@ -441,20 +413,14 @@ const handleDoubleGeneration = async (inputVideoPath, outputVideoPath) => {
                 outputOptions.push("-map", "[a]");
             }
 
-            console.log("Applying filter:", filterGraph);
-
             // Step 3: Reverse the AI-generated video (and audio if available)
             ffmpeg(inputVideoPath)
                 .complexFilter(filterGraph)
                 .outputOptions(outputOptions)
                 .output(reversedVideoPath)
                 .on("end", async () => {
-                    console.log("✅ Reversed video created:", reversedVideoPath);
-
-                    // Step 4: Merge original and reversed video
                     try {
                         await mergeVideos(inputVideoPath, reversedVideoPath, outputVideoPath);
-                        console.log("✅ Double generation complete:", outputVideoPath);
                         cleanupFiles([inputVideoPath, reversedVideoPath]);
                         resolve(outputVideoPath);
                     } catch (mergeError) {
@@ -483,7 +449,6 @@ const testImage = (lastFramePath, timestamp) => {
     }
     const finalLastFramePath = path.join(uploadDir, `last_frame_${timestamp}.jpg`);
     fs.copyFileSync(lastFramePath, finalLastFramePath);
-    console.log("Last Frame Path:", finalLastFramePath);
     return { finalLastFramePath, };
 };
 
@@ -502,17 +467,13 @@ const saveToTestFolder = (timestamp, videoPaths) => {
 
         fs.copyFileSync(filePath, finalPath);
         savedFiles[`file_${index + 1}`] = finalPath; // Store file paths for reference
-
-        console.log(`✅ Saved: ${finalPath}`);
     });
-
-    console.log("✅ All files moved to uploads/ for preview.");
+    
     return savedFiles;
 };
 
 const ensureLocalFile = async (videoPath, localPath) => {
     if (videoPath.startsWith("http")) {
-        console.log(`⬇️ Downloading video from URL: ${videoPath}`);
 
         const response = await axios({
             method: "GET",
@@ -521,11 +482,9 @@ const ensureLocalFile = async (videoPath, localPath) => {
         });
 
         fs.writeFileSync(localPath, Buffer.from(response.data));
-        console.log(`✅ Video downloaded and saved to: ${localPath}`);
         return localPath;
     }
-
-    console.log(`📄 Video is already local: ${videoPath}`);
+ 
     return videoPath;
 };
 
@@ -534,16 +493,9 @@ async function uploadAndSaveVideo(mergedVideoUrl, generationData) {
     const videoTitle = path.basename(storagePath, ".mp4");
 
     try {
-        // Ensure the video exists locally before uploading
         const localVideoPath = await ensureLocalFile(mergedVideoUrl, `/tmp/${videoTitle}.mp4`);
-
-        // Upload video to Firebase Storage
         const downloadUrl = await uploadGeneratedVideosForFeed(localVideoPath, storagePath);
-        console.log("✅ Video uploaded to Firebase:", downloadUrl);
-
-        // Save metadata to Firestore
         const newDocId = await addDocument("videos", downloadUrl, videoTitle, generationData.generationType);
-        console.log("✅ New item added to Firestore:", newDocId);
 
         return downloadUrl;
     } catch (err) {
