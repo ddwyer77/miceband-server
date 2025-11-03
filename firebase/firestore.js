@@ -73,14 +73,23 @@ async function addErrorLog(functionName, message, stackTrace, additionalData = {
  */
 async function uploadVideoToFirebase(localFilePath) {
     try {
+        if (!fs.existsSync(localFilePath)) {
+            throw new Error(`File does not exist: ${localFilePath}`);
+        }
+
         const storage = getStorage(firebaseApp);
         const timestamp = Date.now();
         const fileName = `video-${timestamp}.mp4`;
         const storagePath = `videos/${fileName}`;
         const storageRef = ref(storage, storagePath);
 
-        // Read file data
+        // Read file data (for files up to 150MB, this is acceptable)
+        // Note: Firebase Storage SDK requires a buffer/blob, not a stream
         const fileBuffer = fs.readFileSync(localFilePath);
+        
+        if (!fileBuffer || fileBuffer.length === 0) {
+            throw new Error("File is empty or could not be read");
+        }
 
         // Upload file to Firebase Storage
         await uploadBytes(storageRef, fileBuffer);
@@ -118,7 +127,7 @@ async function deleteVideoFromFirebase(videoUrl) {
 
         const storagePath = match[1]; // Extracted path, e.g., "generatedVideosUnapproved/video-12345.mp4"
 
-        const storage = getStorage();
+        const storage = getStorage(firebaseApp);
         const storageRef = ref(storage, storagePath);
 
         // Delete the video from Firebase Storage

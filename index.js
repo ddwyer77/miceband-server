@@ -11,7 +11,10 @@ const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
 const { uploadGeneratedVideosForFeed } = require("./firebase/upload");
-const { addDocument, addErrorLog, uploadVideoToFirebase, deleteVideoFromFirebase } = require("./firebase/firestore"); 
+const { addDocument, addErrorLog, uploadVideoToFirebase, deleteVideoFromFirebase } = require("./firebase/firestore");
+const { validateVideoRequest, validateCompleteVideoRequest } = require("./utils/validation");
+const { axiosInstance, retryWithBackoff } = require("./utils/axiosConfig");
+const { validateEnvironmentVariables } = require("./utils/envValidation"); 
 
 const app = express();
 const port = process.env.PORT || 8080;
@@ -41,6 +44,13 @@ app.use(cors({
 app.use(express.json({ limit: "150mb" }));
 app.use(express.urlencoded({limit: "150mb", extended: true }));
 
+// Request timeout middleware (10 minutes for video processing)
+app.use((req, res, next) => {
+    req.setTimeout(600000); // 10 minutes
+    res.setTimeout(600000);
+    next();
+});
+
 const minimaxApiKey = process.env.API_KEY_MINIMAX;
 
 const imageToBase64 = (filePath) => {
@@ -56,13 +66,22 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
     const timestamp = Date.now();
     const lastFramePath = path.join(tmpDir, `last_frame_${timestamp}.jpg`);
     const trimmedVideoPath = path.join(tmpDir, `trimmed_${timestamp}.mp4`);
+    const inputFilePath = req.file ? path.resolve(req.file.path) : null;
 
     try {
         if (!req.file) return res.status(400).json({ error: "No video uploaded" });
 
         console.log("Init get task id...");
-        const { clipLength, prompt } = req.body;
-        const inputFilePath = path.resolve(req.file.path); 
+        
+        // Validate input
+        let validatedData;
+        try {
+            validatedData = validateVideoRequest(req.body);
+        } catch (validationError) {
+            return res.status(400).json({ error: validationError.message });
+        }
+        
+        const { clipLength, prompt } = validatedData;
         
         if (!fs.existsSync(tmpDir)) {
             fs.mkdirSync(tmpDir, { recursive: true });
@@ -110,15 +129,24 @@ app.post("/api/get-task-id", upload.single("originalVideo"), async (req, res) =>
 
     } catch (error) {
         console.error("❌ Error processing video:", error);
-        cleanupFiles([lastFramePath, trimmedVideoPath]);
-        return res.status(500).json({ error: error.message });
+        cleanupFiles([lastFramePath, trimmedVideoPath, inputFilePath].filter(Boolean));
+        return res.status(500).json({ error: "Internal server error." });
     }
 });
 
 app.post("/api/complete-video", async (req, res) => {
     const startTime = Date.now();
-    let { aiVideoFileId, audioUrl, doubleGeneration, trimmedVideo, clipLength, generationType, email } = req.body;
     const timestamp = Date.now();
+    
+    // Validate input
+    let validatedData;
+    try {
+        validatedData = validateCompleteVideoRequest(req.body);
+    } catch (validationError) {
+        return res.status(400).json({ error: validationError.message });
+    }
+    
+    let { aiVideoFileId, audioUrl, doubleGeneration, trimmedVideo, clipLength, generationType, email } = validatedData;
     const aiVideoPath = `/tmp/ai_generated_${timestamp}.mp4`;
     const generatedVideoWithAudioPath = `/tmp/generated_with_audio_${timestamp}.mp4`;
     const combinedVideoPath = `/tmp/combined_${timestamp}.mp4`;
@@ -172,6 +200,7 @@ app.post("/api/complete-video", async (req, res) => {
         //     });
         // }
     } catch (error) {
+        const totalSeconds = ((Date.now() - startTime) / 1000).toFixed(2);
         console.error("❌ Error completing video:", error);
         console.log(`⏱️ /api/complete-video completed in ${totalSeconds} seconds`);
         try {
@@ -180,14 +209,20 @@ app.post("/api/complete-video", async (req, res) => {
                 doubleGeneration,
                 email
             });
-        } catch (error) {
-            console.error("❌ Error logging error:", error);
+        } catch (logError) {
+            console.error("❌ Error logging error:", logError);
         }
 
         const filesToCleanup = [combinedVideoPath];
         if (doubleGeneratedVideoPath) filesToCleanup.push(doubleGeneratedVideoPath);
         cleanupFiles(filesToCleanup);
-        deleteVideoFromFirebase(trimmedVideo);
+        if (trimmedVideo) {
+            try {
+                await deleteVideoFromFirebase(trimmedVideo);
+            } catch (deleteError) {
+                console.error("❌ Error deleting video from Firebase:", deleteError);
+            }
+        }
         return res.status(500).json({ error: "Internal server error." });
     }
 });
@@ -199,7 +234,8 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
  */
 const trimVideo = (inputPath, outputPath, duration) => {
     return new Promise((resolve, reject) => {
-        ffmpeg(inputPath)
+        let timeout;
+        const ffmpegProcess = ffmpeg(inputPath)
             .setStartTime(0)
             .setDuration(duration)
             .outputOptions([
@@ -213,10 +249,19 @@ const trimVideo = (inputPath, outputPath, duration) => {
                 "-vf crop='min(iw,ih*9/16)':'min(iw*16/9,ih)',scale=1080:1920" // 🔹 Crop & scale to 9:16
             ])
             .output(outputPath)
+            .on("start", (commandLine) => {
+                // Set timeout for FFmpeg operation (5 minutes)
+                timeout = setTimeout(() => {
+                    ffmpegProcess.kill("SIGKILL");
+                    reject(new Error("FFmpeg trimming timeout"));
+                }, 300000);
+            })
             .on("end", () => {
+                if (timeout) clearTimeout(timeout);
                 resolve(outputPath);
             })
             .on("error", (err) => {
+                if (timeout) clearTimeout(timeout);
                 console.error("❌ FFmpeg trimming error:", err);
                 reject(err);
             })
@@ -226,22 +271,31 @@ const trimVideo = (inputPath, outputPath, duration) => {
 
 const extractLastFrame = (inputPath, outputImagePath) => {
     return new Promise((resolve, reject) => {
+        let timeout;
         ffmpeg.ffprobe(inputPath, (err, metadata) => {
             if (err) return reject(err);
             const duration = metadata.format.duration;
             const lastFrameTime = Math.max(0, duration - 0.1);
 
-            ffmpeg(inputPath)
+            const ffmpegProcess = ffmpeg(inputPath)
                 .screenshots({ 
                     timestamps: [lastFrameTime], 
                     filename: path.basename(outputImagePath), 
                     folder: path.dirname(outputImagePath), 
                     size: "1080x1920"  // ✅ Ensure it's 9:16 like the video
                 })
+                .on("start", () => {
+                    timeout = setTimeout(() => {
+                        ffmpegProcess.kill("SIGKILL");
+                        reject(new Error("FFmpeg frame extraction timeout"));
+                    }, 60000); // 1 minute timeout
+                })
                 .on("end", () => {
+                    if (timeout) clearTimeout(timeout);
                     resolve(outputImagePath);
                 })
                 .on("error", (err) => {
+                    if (timeout) clearTimeout(timeout);
                     console.error("❌ FFmpeg error extracting frame:", err);
                     reject(err);
                 });
@@ -255,34 +309,56 @@ const getAIVideoTaskId = async (imagePath, prompt) => {
     const payload = { model: "video-01", first_frame_image: `data:image/png;base64,${imageBase64}`, prompt };
     const headers = { authorization: `Bearer ${minimaxApiKey}`, "Content-Type": "application/json" };
 
-    const response = await axios.post("https://api.minimaxi.chat/v1/video_generation", payload, { headers });
+    const response = await retryWithBackoff(async () => {
+        return await axiosInstance.post("https://api.minimaxi.chat/v1/video_generation", payload, { headers });
+    });
+    
+    if (!response.data || !response.data.task_id) {
+        throw new Error("Invalid response from Minimax API: missing task_id");
+    }
+    
     const taskId = response.data.task_id;
-
     return taskId;
 };
 
 const getAIVideoFile = async (fileId, outputPath) => {
     const headers = { Authorization: `Bearer ${minimaxApiKey}` };
-    // Step 1: Get the video metadata (download URL)
-    const fileRes = await axios.get(`https://api.minimaxi.chat/v1/files/retrieve?file_id=${fileId}`, { headers });
+    
+    // Step 1: Get the video metadata (download URL) with retry
+    const fileRes = await retryWithBackoff(async () => {
+        return await axiosInstance.get(`https://api.minimaxi.chat/v1/files/retrieve?file_id=${fileId}`, { headers });
+    });
 
-    if (!fileRes.data.file || !fileRes.data.file.download_url) {
+    if (!fileRes.data || !fileRes.data.file || !fileRes.data.file.download_url) {
         console.error("❌ AI Video Not Found:", fileRes.data);
         throw new Error("AI Video not found.");
     }
 
     const downloadUrl = fileRes.data.file.download_url;
-    const response = await axios({ method: "GET", url: downloadUrl, responseType: "stream" });
+    
+    // Step 2: Download video with timeout and retry
+    const response = await retryWithBackoff(async () => {
+        return await axiosInstance({ method: "GET", url: downloadUrl, responseType: "stream", timeout: 300000 });
+    });
 
     const writer = fs.createWriteStream(outputPath);
     response.data.pipe(writer);
 
     return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            writer.destroy();
+            reject(new Error("Video download timeout"));
+        }, 300000); // 5 minute timeout
+
         writer.on("finish", () => {
+            clearTimeout(timeout);
             writer.close();
             resolve(outputPath);
         });
-        writer.on("error", reject);
+        writer.on("error", (err) => {
+            clearTimeout(timeout);
+            reject(err);
+        });
     });
 };
 
@@ -290,12 +366,14 @@ const mergeVideos = (video1, video2, outputPath) => {
     const timestamp = Date.now();
     return new Promise((resolve, reject) => {
         const tmpDir = "/tmp"; // Ensure using a valid temp directory
+        let tmpFileList = null;
+        let timeout;
 
         if (!fs.existsSync(tmpDir)) {
             fs.mkdirSync(tmpDir, { recursive: true });
         }
 
-        const tmpFileList = path.join(tmpDir, `video_list_${timestamp}.txt`);
+        tmpFileList = path.join(tmpDir, `video_list_${timestamp}.txt`);
 
         try {
             fs.writeFileSync(
@@ -307,7 +385,7 @@ const mergeVideos = (video1, video2, outputPath) => {
             return reject(error);
         }
   
-        ffmpeg()
+        const ffmpegProcess = ffmpeg()
         .input(tmpFileList)
         .inputOptions(["-f concat", "-safe 0"]) // Use concat mode
         .outputOptions([
@@ -321,11 +399,32 @@ const mergeVideos = (video1, video2, outputPath) => {
             "-vf scale=1080:-2,setsar=1,pad=1080:1920:(ow-iw)/2:(oh-ih)/2" // 🔹 Ensure 9:16 aspect ratio
         ])
         .output(outputPath)
+        .on("start", () => {
+            timeout = setTimeout(() => {
+                ffmpegProcess.kill("SIGKILL");
+                reject(new Error("FFmpeg merging timeout"));
+            }, 300000); // 5 minute timeout
+        })
         .on("end", () => {
-            // fs.unlinkSync(tmpFileList); // Cleanup temp file
+            if (timeout) clearTimeout(timeout);
+            try {
+                if (tmpFileList && fs.existsSync(tmpFileList)) {
+                    fs.unlinkSync(tmpFileList);
+                }
+            } catch (cleanupError) {
+                console.error("❌ Error cleaning up temp file list:", cleanupError);
+            }
             resolve(outputPath);
         })
         .on("error", (err) => {
+            if (timeout) clearTimeout(timeout);
+            try {
+                if (tmpFileList && fs.existsSync(tmpFileList)) {
+                    fs.unlinkSync(tmpFileList);
+                }
+            } catch (cleanupError) {
+                console.error("❌ Error cleaning up temp file list:", cleanupError);
+            }
             console.error("❌ FFmpeg merging error:", err);
             reject(err);
         })
@@ -334,18 +433,35 @@ const mergeVideos = (video1, video2, outputPath) => {
 };
 
 async function downloadVideo(url, filePath) {
-    const response = await axios({ method: "GET", url, responseType: "stream" });
+    const response = await retryWithBackoff(async () => {
+        return await axiosInstance({ method: "GET", url, responseType: "stream", timeout: 300000 });
+    });
+    
     const writer = fs.createWriteStream(filePath);
     response.data.pipe(writer);
 
     return new Promise((resolve, reject) => {
-        writer.on("finish", resolve);
-        writer.on("error", reject);
+        const timeout = setTimeout(() => {
+            writer.destroy();
+            reject(new Error("Video download timeout"));
+        }, 300000); // 5 minute timeout
+
+        writer.on("finish", () => {
+            clearTimeout(timeout);
+            resolve();
+        });
+        writer.on("error", (err) => {
+            clearTimeout(timeout);
+            reject(err);
+        });
     });
 }
 
 const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLength) => {
     return new Promise(async (resolve, reject) => {
+        let audioPath = null;
+        let timeout;
+        
         try {
             // Ensure the /tmp directory exists
             const tmpDir = "/tmp";
@@ -353,13 +469,23 @@ const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLeng
                 fs.mkdirSync(tmpDir, { recursive: true });
             }
 
-            // Download the audio file
-            const audioResponse = await axios.get(audioUrl, { responseType: "arraybuffer" });
-            const audioPath = path.join(tmpDir, `audio_${timestamp}.mp3`);
-            fs.writeFileSync(audioPath, Buffer.from(audioResponse.data));
+            audioPath = path.join(tmpDir, `audio_${timestamp}.mp3`);
+            
+            // Download the audio file with retry and streaming
+            const audioResponse = await retryWithBackoff(async () => {
+                return await axiosInstance.get(audioUrl, { responseType: "stream", timeout: 60000 });
+            });
+            
+            const audioWriter = fs.createWriteStream(audioPath);
+            audioResponse.data.pipe(audioWriter);
+            
+            await new Promise((resolveAudio, rejectAudio) => {
+                audioWriter.on("finish", resolveAudio);
+                audioWriter.on("error", rejectAudio);
+            });
 
             // Merge audio with video
-            ffmpeg(videoPath)
+            const ffmpegProcess = ffmpeg(videoPath)
                 .input(audioPath)
                 .outputOptions([
                     `-t ${clipLength}`,
@@ -371,10 +497,23 @@ const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLeng
                     "-pix_fmt yuv420p"
                 ])
                 .output(outputPath)
+                .on("start", () => {
+                    timeout = setTimeout(() => {
+                        ffmpegProcess.kill("SIGKILL");
+                        reject(new Error("FFmpeg audio merge timeout"));
+                    }, 300000); // 5 minute timeout
+                })
                 .on("end", () => {
+                    if (timeout) clearTimeout(timeout);
                     // Check if file was created before resolving
                     if (fs.existsSync(outputPath)) {
-                        fs.unlinkSync(audioPath); // Cleanup audio file
+                        try {
+                            if (audioPath && fs.existsSync(audioPath)) {
+                                fs.unlinkSync(audioPath); // Cleanup audio file
+                            }
+                        } catch (cleanupError) {
+                            console.error("❌ Error cleaning up audio file:", cleanupError);
+                        }
                         resolve(outputPath);
                     } else {
                         console.error("❌ FFmpeg finished but output file is missing:", outputPath);
@@ -382,26 +521,42 @@ const addBackgroundMusic = (videoPath, outputPath, audioUrl, timestamp, clipLeng
                     }
                 })
                 .on("error", (err) => {
+                    if (timeout) clearTimeout(timeout);
                     console.error("❌ FFmpeg audio merge failed:", err);
+                    try {
+                        if (audioPath && fs.existsSync(audioPath)) {
+                            fs.unlinkSync(audioPath);
+                        }
+                    } catch (cleanupError) {
+                        console.error("❌ Error cleaning up audio file:", cleanupError);
+                    }
                     reject(err);
                 })
                 .run();
         } catch (error) {
+            if (timeout) clearTimeout(timeout);
             console.error("❌ Error downloading audio or processing video:", error);
+            try {
+                if (audioPath && fs.existsSync(audioPath)) {
+                    fs.unlinkSync(audioPath);
+                }
+            } catch (cleanupError) {
+                console.error("❌ Error cleaning up audio file:", cleanupError);
+            }
             reject(error);
         }
     });
 };
 
 const handleDoubleGeneration = async (inputVideoPath, outputVideoPath) => {
-
     inputVideoPath = await ensureLocalFile(inputVideoPath, `/tmp/video_${Date.now()}.mp4`);
     const reversedVideoPath = inputVideoPath.replace(/\.mp4$/, "_reversed.mp4");
 
     return new Promise((resolve, reject) => {
+        let timeout;
         ffmpeg.ffprobe(inputVideoPath, (err, metadata) => {
             if (err) {
-                return reject("❌ Error probing video metadata: " + err);
+                return reject(new Error("Error probing video metadata: " + err.message));
             }
 
             const hasAudio = metadata.streams.some(stream => stream.codec_type === "audio");
@@ -414,11 +569,18 @@ const handleDoubleGeneration = async (inputVideoPath, outputVideoPath) => {
             }
 
             // Step 3: Reverse the AI-generated video (and audio if available)
-            ffmpeg(inputVideoPath)
+            const ffmpegProcess = ffmpeg(inputVideoPath)
                 .complexFilter(filterGraph)
                 .outputOptions(outputOptions)
                 .output(reversedVideoPath)
+                .on("start", () => {
+                    timeout = setTimeout(() => {
+                        ffmpegProcess.kill("SIGKILL");
+                        reject(new Error("FFmpeg reverse timeout"));
+                    }, 300000); // 5 minute timeout
+                })
                 .on("end", async () => {
+                    if (timeout) clearTimeout(timeout);
                     try {
                         await mergeVideos(inputVideoPath, reversedVideoPath, outputVideoPath);
                         cleanupFiles([inputVideoPath, reversedVideoPath]);
@@ -428,7 +590,10 @@ const handleDoubleGeneration = async (inputVideoPath, outputVideoPath) => {
                         reject(mergeError);
                     }
                 })
-                .on("error", reject)
+                .on("error", (err) => {
+                    if (timeout) clearTimeout(timeout);
+                    reject(err);
+                })
                 .run();
         });
     })
@@ -436,52 +601,46 @@ const handleDoubleGeneration = async (inputVideoPath, outputVideoPath) => {
 
 const cleanupFiles = (files) => {
     files.forEach((file) => {
-        if (fs.existsSync(file)) {
-            fs.unlinkSync(file);
+        if (file && fs.existsSync(file)) {
+            try {
+                fs.unlinkSync(file);
+            } catch (error) {
+                console.error(`❌ Error cleaning up file ${file}:`, error.message);
+            }
         }
     });
 };
 
-const testImage = (lastFramePath, timestamp) => {
-    const uploadDir = path.resolve("uploads"); // Define upload directory
-    if (!fs.existsSync(uploadDir)) {
-        fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    const finalLastFramePath = path.join(uploadDir, `last_frame_${timestamp}.jpg`);
-    fs.copyFileSync(lastFramePath, finalLastFramePath);
-    return { finalLastFramePath, };
-};
-
-const saveToTestFolder = (timestamp, videoPaths) => {
-    const uploadDir = path.resolve("uploads"); // Define upload directory
-
-    if (!fs.existsSync(uploadDir)) {
-        fs.mkdirSync(uploadDir, { recursive: true });
-    }
-
-    const savedFiles = {};
-
-    videoPaths.forEach((filePath, index) => {
-        const fileName = path.basename(filePath); // Extract original filename
-        const finalPath = path.join(uploadDir, `${timestamp}_${fileName}`); // Rename with timestamp
-
-        fs.copyFileSync(filePath, finalPath);
-        savedFiles[`file_${index + 1}`] = finalPath; // Store file paths for reference
-    });
-    
-    return savedFiles;
-};
-
 const ensureLocalFile = async (videoPath, localPath) => {
     if (videoPath.startsWith("http")) {
-
-        const response = await axios({
-            method: "GET",
-            url: videoPath,
-            responseType: "arraybuffer",
+        const response = await retryWithBackoff(async () => {
+            return await axiosInstance({
+                method: "GET",
+                url: videoPath,
+                responseType: "stream",
+                timeout: 300000
+            });
         });
 
-        fs.writeFileSync(localPath, Buffer.from(response.data));
+        const writer = fs.createWriteStream(localPath);
+        response.data.pipe(writer);
+
+        await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                writer.destroy();
+                reject(new Error("File download timeout"));
+            }, 300000);
+
+            writer.on("finish", () => {
+                clearTimeout(timeout);
+                resolve();
+            });
+            writer.on("error", (err) => {
+                clearTimeout(timeout);
+                reject(err);
+            });
+        });
+
         return localPath;
     }
  
@@ -557,6 +716,14 @@ const getVideoMetadata = (videoPath) => {
         });
     });
 };
+
+// Validate environment variables at startup
+try {
+    validateEnvironmentVariables();
+} catch (error) {
+    console.error("❌ Environment validation failed:", error.message);
+    process.exit(1);
+}
 
 app.listen(port, () => {
     console.log(`🚀 Server running on port ${port}`);

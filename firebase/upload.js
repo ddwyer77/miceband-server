@@ -25,8 +25,19 @@ const storage = getStorage(firebaseApp);
  */
 async function uploadGeneratedVideosForFeed(localFilePath, storagePath) {
     try {
+        if (!fs.existsSync(localFilePath)) {
+            throw new Error(`File does not exist: ${localFilePath}`);
+        }
+
         const bucketRef = ref(storage, storagePath);
+        
+        // Read file data (for files up to 150MB, this is acceptable)
+        // Note: Firebase Storage SDK requires a buffer/blob, not a stream
         const videoBuffer = fs.readFileSync(localFilePath);
+        
+        if (!videoBuffer || videoBuffer.length === 0) {
+            throw new Error("File is empty or could not be read");
+        }
 
         // Upload video to Firebase Storage
         await uploadBytes(bucketRef, videoBuffer);
