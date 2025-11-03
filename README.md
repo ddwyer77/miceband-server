@@ -1,0 +1,1 @@
+gcloud app deploy --project=mice-band-454900 --stop-previous-version

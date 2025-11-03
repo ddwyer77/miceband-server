@@ -164,6 +164,8 @@ app.post("/api/complete-video", async (req, res) => {
             doubleGeneratedVideoPath = aiVideoPath.replace(/\.mp4$/, "_double.mp4");
             processedVideoPath = await handleDoubleGeneration(aiVideoPath, doubleGeneratedVideoPath);
             clipLength = clipLength * 2; // Double the clip length
+            // Clean up original AI video immediately to free memory
+            cleanupFiles([aiVideoPath]);
             console.log("🎥 Double generation completed:", processedVideoPath);
         }
 
@@ -171,6 +173,7 @@ app.post("/api/complete-video", async (req, res) => {
         console.log("Adding background audio...");
         await addBackgroundMusic(processedVideoPath, generatedVideoWithAudioPath, audioUrl, timestamp, clipLength);
         console.log("✅ Audio added:", generatedVideoWithAudioPath);
+        // Clean up processed video immediately
         cleanupFiles([processedVideoPath]);
 
         await downloadVideo(trimmedVideo, trimmedVideoPath);
@@ -179,14 +182,28 @@ app.post("/api/complete-video", async (req, res) => {
         console.log("Merging videos...");
       
         await mergeVideos(trimmedVideoPath, generatedVideoWithAudioPath, combinedVideoPath);
-        cleanupFiles([trimmedVideoPath, generatedVideoWithAudioPath, aiVideoPath]);
+        // Clean up ALL input files BEFORE upload to minimize memory usage
+        cleanupFiles([trimmedVideoPath, generatedVideoWithAudioPath]);
+        // Clean up aiVideoPath if single generation (double gen already cleaned it)
+        if (!doubleGeneration) {
+            cleanupFiles([aiVideoPath]);
+        }
+        
+        // Force garbage collection hint before memory-intensive upload
+        if (global.gc) {
+            global.gc();
+        }
         
         const downloadUrl = await uploadAndSaveVideo(combinedVideoPath, { generationType });
         console.log("✅ Video uploaded and saved:", downloadUrl);
-
-        const filesToCleanup = [combinedVideoPath];
-        if (doubleGeneratedVideoPath) filesToCleanup.push(doubleGeneratedVideoPath);
-        cleanupFiles(filesToCleanup);
+        
+        // Clean up combined video immediately after upload to free memory
+        cleanupFiles([combinedVideoPath]);
+        if (doubleGeneratedVideoPath) {
+            cleanupFiles([doubleGeneratedVideoPath]);
+        }
+        
+        // Clean up trimmed video from Firebase Storage
         deleteVideoFromFirebase(trimmedVideo);
 
         const totalSeconds = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -652,7 +669,11 @@ async function uploadAndSaveVideo(mergedVideoUrl, generationData) {
     const videoTitle = path.basename(storagePath, ".mp4");
 
     try {
-        const localVideoPath = await ensureLocalFile(mergedVideoUrl, `/tmp/${videoTitle}.mp4`);
+        // mergedVideoUrl is already a local path, no need to download
+        const localVideoPath = mergedVideoUrl.startsWith("http") 
+            ? await ensureLocalFile(mergedVideoUrl, `/tmp/${videoTitle}.mp4`)
+            : mergedVideoUrl;
+        
         const downloadUrl = await uploadGeneratedVideosForFeed(localVideoPath, storagePath);
         const newDocId = await addDocument("videos", downloadUrl, videoTitle, generationData.generationType);
 
