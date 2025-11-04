@@ -323,7 +323,7 @@ const extractLastFrame = (inputPath, outputImagePath) => {
 
 const getAIVideoTaskId = async (imagePath, prompt) => {
     const imageBase64 = imageToBase64(imagePath);
-    const payload = { model: "video-01", first_frame_image: `data:image/png;base64,${imageBase64}`, prompt };
+    const payload = { model: "MiniMax-Hailuo-2.3", first_frame_image: `data:image/png;base64,${imageBase64}`, prompt };
     const headers = { authorization: `Bearer ${minimaxApiKey}`, "Content-Type": "application/json" };
 
     const response = await retryWithBackoff(async () => {
